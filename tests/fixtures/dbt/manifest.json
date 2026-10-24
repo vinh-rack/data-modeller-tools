@@ -1,0 +1,15 @@
+{
+  "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json", "dbt_version": "1.10.0", "project_name": "synthetic_fleet"},
+  "nodes": {
+    "model.synthetic_fleet.stg_booking": {"resource_type": "model", "name": "stg_booking", "schema": "slvr_stg", "alias": "booking", "depends_on": {"macros": [], "nodes": ["source.synthetic_fleet.fleetops.booking"]}},
+    "model.synthetic_fleet.stg_meter_change": {"resource_type": "model", "name": "stg_meter_change", "schema": "slvr_stg", "alias": "meter_change", "depends_on": {"macros": [], "nodes": ["source.synthetic_fleet.fleetops.meter_change"]}},
+    "model.synthetic_fleet.fct_booking": {"resource_type": "model", "name": "fct_booking", "schema": "gold_fleet", "alias": "f_booking", "depends_on": {"macros": [], "nodes": ["model.synthetic_fleet.stg_booking", "model.synthetic_fleet.stg_meter_change", "model.synthetic_fleet.removed_model"]}},
+    "test.synthetic_fleet.not_null_fct_booking_id": {"resource_type": "test", "name": "not_null_fct_booking_id", "depends_on": {"macros": [], "nodes": ["model.synthetic_fleet.fct_booking"]}}
+  },
+  "sources": {
+    "source.synthetic_fleet.fleetops.booking": {"resource_type": "source", "source_name": "fleetops", "name": "booking", "identifier": "booking", "schema": "brnz_fleetops"},
+    "source.synthetic_fleet.fleetops.meter_change": {"resource_type": "source", "source_name": "fleetops", "name": "meter_change", "identifier": "meter_change", "schema": "brnz_fleetops"}
+  },
+  "parent_map": {},
+  "child_map": {}
+}
