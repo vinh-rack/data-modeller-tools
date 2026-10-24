@@ -1,0 +1,32 @@
+[project]
+name = "data-modeller-assistant"
+version = "0.1.0"
+description = "Local read-only MCP server and instruction pack for reviewing, building and tracing lineage of lakehouse data models."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp==2.3.*",
+    "openpyxl>=3.1.5",
+    "pydantic>=2.14",
+    "pyyaml>=6.0.3",
+    "sqlglot==30.*",
+    "python-dotenv>=1.2",
+]
+
+[project.scripts]
+dma-server = "dma.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "dma"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

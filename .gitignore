@@ -1,0 +1,25 @@
+# Real client material stays local only
+samples/
+docs/*
+!docs/ARCHITECTURE.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Generated artifacts
+output/*
+!output/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Local personal instructions
+CLAUDE.local.md
