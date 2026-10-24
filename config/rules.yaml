@@ -1,0 +1,59 @@
+# Rules engine configuration. Defaults come from Formatting_and_Naming_Conventions.md
+# and the 17 Sept 2026 modelling walkthrough. Adjust values here, not in code.
+
+# Schema name to layer. First matching regex wins.
+layer_schema_patterns:
+  bronze: ["^brnz_"]
+  silver_staging: ["^slvr_stg$"]
+  silver_idm: ["^slvr_cdm$", "^slvr_(?!stg$)"]
+  gold: ["^gold_"]
+
+# Source system cell values that identify a layer when the source table is unqualified.
+source_system_layers:
+  bronze: bronze
+  slvr_stg: silver_staging
+  slvr_cdm: silver_idm
+
+# Schema name to business unit. First match wins. Use a fixed bu or a named group (?P<bu>...).
+# bu: null means the schema does not belong to a BU (shared staging or source schemas).
+business_units:
+  - pattern: "^brnz_"
+    bu: null
+  - pattern: "^slvr_stg$"
+    bu: null
+  - pattern: "^(gold|slvr)_cdm$"
+    bu: cdm
+  - pattern: "^(gold|slvr)_(?P<bu>[a-z0-9_]+)$"
+
+rules:
+  LAYER-001:
+    enabled: true
+    severity: error
+  FACT-001:
+    enabled: true
+    severity: error
+    fact_prefixes: ["f_"]
+    descriptive_suffixes: ["_nm", "_name", "_desc", "_description", "_txt"]
+  NAME-001:
+    enabled: true
+    severity: warning
+    snake_case_regex: "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+    gold_table_prefixes: ["f_", "d_", "agg_", "lkp_"]
+    view_suffix: "_vw"
+    forbidden_view_prefix: "vw_"
+    forbidden_table_suffixes: ["_lookup", "_enum"]
+  GOLD-001:
+    enabled: true
+    severity: warning
+  GRAIN-001:
+    enabled: true
+    severity_same_bu: error
+    severity_cross_bu: warning
+    # When true, tables only count as the same grain if they also share a bronze source.
+    require_shared_bronze: false
+  GRAIN-002:
+    enabled: true
+    severity: warning
+    fact_prefixes: ["f_"]
+    aggregation_patterns: ["\\bsum\\s*\\(", "\\bcount\\s*\\(", "\\bavg\\s*\\(", "\\bmin\\s*\\(", "\\bmax\\s*\\(", "\\bgroup\\s+by\\b"]
+    view_suffix: "_vw"

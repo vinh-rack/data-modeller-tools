@@ -1,0 +1,57 @@
+# SMX workbook to internal field mapping.
+#
+# PLACEHOLDER: built from header names observed in two existing layout families
+# (EIP_SMX_* workbooks and the canonical A2 layout in Formatting_and_Naming_Conventions.md).
+# It is not the official SMX template. Replace or extend it once the template is confirmed.
+#
+# Matching is case-insensitive, trims whitespace and collapses repeated spaces.
+# Only sheets listed under layers are read. Every other sheet is ignored.
+
+header_scan_rows: 15
+
+layers:
+  bronze:
+    sheets: ["bronze"]
+  silver_staging:
+    sheets: ["silver - staging", "silver stage", "silver staging"]
+  silver_idm:
+    sheets: ["silver - idm", "silver idm"]
+  gold:
+    sheets: ["gold - sdm", "gold sdm"]
+
+# Each field lists header aliases. A header maps to the first field whose alias matches exactly.
+fields:
+  schema: ["schema", "schema name", "target schema"]
+  table: ["table name", "table_name", "target table", "target table name"]
+  column: ["column name", "target column name"]
+  data_type: ["data type"]
+  source_system: ["source system"]
+  source_table: ["source table", "source table name", "source table / file", "table / file"]
+  source_column: ["source column", "source column name", "column"]
+  is_pk: ["pk", "is pk"]
+  is_fk: ["is fk", "fk"]
+  rules: ["rules", "join/rule/filter applied"]
+  rules_comments: ["rules related comments"]
+  description: ["description"]
+
+# Fields that must be found for a layer sheet to be read.
+required_fields:
+  default: ["table", "column"]
+  bronze: ["table"]
+
+# When no schema alias matches and the first header cell looks like a schema value
+# (for example a header cell reading slvr_cdm), treat column A as the schema column.
+schema_from_first_header: true
+
+# When a sheet has a column field but no table field, rows like "slvr_stg.asset"
+# in the column field start a new table (marker row layout).
+marker_rows_when_no_table_field: true
+
+# Cell values meaning "yes" for flag fields.
+true_values: ["y", "yes", "true", "1"]
+
+# Cell values meaning "no column" on a table-level row.
+empty_values: ["", "-", "n/a", "na"]
+
+# When a sheet has no pk field, a rules cell matching this regex marks the column as PK.
+pk_rule_pattern: "^\\s*pk\\b"
