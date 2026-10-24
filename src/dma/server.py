@@ -1,2 +1,56 @@
-def main():
-    raise SystemExit("server not implemented yet")
+"""MCP entry point: builds the server, registers tools, picks the transport. No tool logic here."""
+
+import logging
+from pathlib import Path
+
+from dotenv import load_dotenv
+from mcp.server import MCPServer
+from mcp.types import ToolAnnotations
+
+from dma.config import load_settings
+from dma.tools import DmaTools
+
+READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
+WRITES_OUTPUT = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
+
+INSTRUCTIONS = (
+    "Read-only assistant for lakehouse SMX data models (Bronze, Silver Staging, Silver IDM, Gold). "
+    "Use run_rules for every deterministic check instead of re-deriving it. "
+    "write_artifact is the only tool that writes, and only into the output folder."
+)
+
+TOOLS = [
+    ("list_models", "List SMX models in the baseline folder with layer sheets, table counts and layout warnings. Start here.", READ_ONLY),
+    ("get_model", "Return every table of one SMX model: layer, schema, BU, grain (PK columns), columns and source tables.", READ_ONLY),
+    ("find_tables_by_bronze", "Find modelled tables in any SMX that source from a bronze table, directly or through upstream layers. Use for reuse checks.", READ_ONLY),
+    ("find_tables_by_grain", "Find tables in any SMX whose grain (PK column set) equals the given columns. Use to check one table per grain.", READ_ONLY),
+    ("run_rules", "Run the deterministic rules (LAYER-001, FACT-001, NAME-001, GOLD-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
+    ("dbt_upstream", "List the bronze source tables a dbt model depends on, from the dbt manifest depends_on graph.", READ_ONLY),
+    ("sql_column_lineage", "Trace one output column of a SQL statement to its source table columns (redshift, databricks or spark dialect).", READ_ONLY),
+    ("write_artifact", "Write a new artifact into the output folder. Never overwrites and never writes anywhere else.", WRITES_OUTPUT),
+]
+
+
+def build_server(tools: DmaTools | None = None) -> MCPServer:
+    tools = tools or DmaTools(load_settings())
+    srv = MCPServer("data-modeller-assistant", instructions=INSTRUCTIONS, version="0.1.0")
+    for name, description, annotations in TOOLS:
+        srv.tool(name=name, description=description, annotations=annotations)(getattr(tools, name))
+    return srv
+
+
+def main() -> None:
+    load_dotenv(Path.cwd() / ".env")
+    # stdout carries the stdio protocol, so logs go to stderr only.
+    logging.basicConfig(level=logging.WARNING)
+    settings = load_settings()
+    srv = build_server(DmaTools(settings))
+    if settings.transport == "stdio":
+        srv.run(transport="stdio")
+    else:
+        # v2: add "streamable-http" here with srv.run(transport="streamable-http", host=..., port=...). Tools stay unchanged.
+        raise SystemExit(f"DMA_TRANSPORT={settings.transport!r} is not enabled in v1. Use stdio.")
+
+
+if __name__ == "__main__":
+    main()

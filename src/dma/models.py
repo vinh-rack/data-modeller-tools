@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class Layer(StrEnum):
@@ -29,6 +29,7 @@ class SourceRef(BaseModel):
     table: str
     source_system: str | None = None
 
+    @computed_field
     @property
     def qualified(self) -> str:
         return f"{self.schema_name}.{self.table}" if self.schema_name else self.table
@@ -57,10 +58,12 @@ class Table(BaseModel):
     sheet: str
     row: int
 
+    @computed_field
     @property
     def qualified(self) -> str:
         return f"{self.schema_name}.{self.name}" if self.schema_name else self.name
 
+    @computed_field
     @property
     def grain(self) -> list[str]:
         """Declared grain: the sorted set of PK column names."""
