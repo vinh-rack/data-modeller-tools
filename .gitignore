@@ -2,6 +2,7 @@
 samples/
 docs/*
 !docs/ARCHITECTURE.md
+!docs/REQUIREMENTS.md
 
 # Secrets
 .env
@@ -21,5 +22,5 @@ __pycache__/
 dist/
 build/
 
-# Local personal instructions
-CLAUDE.local.md
+
+.obsidian/
