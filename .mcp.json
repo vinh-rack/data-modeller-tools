@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "dma": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--quiet", "--directory", "${CLAUDE_PROJECT_DIR:-.}", "dma-server"],
+      "env": {
+        "DMA_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
