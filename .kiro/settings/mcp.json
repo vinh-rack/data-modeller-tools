@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "dma": {
+      "command": "uv",
+      "args": ["run", "--quiet", "dma-server"],
+      "env": {
+        "DMA_TRANSPORT": "stdio"
+      },
+      "disabled": false,
+      "autoApprove": ["list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage"]
+    }
+  }
+}

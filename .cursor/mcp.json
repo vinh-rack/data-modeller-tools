@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "dma": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "--quiet", "--directory", "${workspaceFolder}", "dma-server"],
+      "env": {
+        "DMA_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
