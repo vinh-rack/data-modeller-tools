@@ -19,6 +19,8 @@ uv run python scripts/smoke_client.py
 
 The smoke client starts `dma-server` over stdio, lists the 8 tools and runs `run_rules` on the synthetic fixture model. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
 
+To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls all 8 tools on the fixtures and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
+
 Optional: the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) needs Node 22.19 or newer. In its UI, choose a stdio connection with command `uv` and arguments `run --quiet dma-server`, started from the repo root.
 
 ### *1.3. Environment variables*
