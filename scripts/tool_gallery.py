@@ -1,7 +1,7 @@
 """Call every MCP tool on the synthetic fixtures and render one static HTML page showing input and output.
 
 Run: uv run python scripts/tool_gallery.py
-Writes output/tool_gallery.html. Demo writes from write_artifact go to a temp folder, not output/.
+Writes output/tool_gallery.html. Demo sessions and writes go to a temp folder, not output/.
 """
 
 import asyncio
@@ -30,8 +30,18 @@ CALLS = [
     ("run_rules", {"model_name": "synthetic_fleet_eip"}),
     ("dbt_upstream", {"model_name": "fct_booking"}),
     ("sql_column_lineage", {"sql": (FIX / "sql" / "fct_booking.sql").read_text(encoding="utf-8"), "column": "total_amount", "dialect": "databricks"}),
-    ("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "should be refused"}),
-    ("write_artifact", {"kind": "findings_md", "name": "review", "content": "# Findings\n"}),
+    ("start_session", {"flow": "lineage", "scope": "synthetic_fleet_eip gold_fleet.f_booking"}),
+    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Trace gold_fleet.f_booking to bronze."}),
+    ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 1, "decision": "suggest_changes", "note": "Include the column lineage for total_amount."}),
+    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Trace gold_fleet.f_booking and total_amount to bronze."}),
+    ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 2, "decision": "approve"}),
+    ("write_artifact", {"kind": "lineage_mermaid", "name": "too_early", "content": "flowchart LR", "session_id": "$sid"}),
+    ("_approve_rest", {}),
+    ("get_session", {"session_id": "$sid"}),
+    ("compile_report", {"session_id": "$sid"}),
+    ("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "should be refused", "session_id": "$sid"}),
+    ("write_artifact", {"kind": "lineage_mermaid", "name": "f_booking_lineage", "content": "flowchart LR\n  b[brnz_fleetops.booking] --> f[gold_fleet.f_booking]\n", "session_id": "$sid"}),
+    ("list_sessions", {}),
 ]
 
 CSS = """
@@ -109,6 +119,16 @@ def render_view(name, args, data, error) -> str:
             ("source columns", [(f"{s['table']}.{s['column']}", True) for s in data["sources"]]),
             ("output column", [(data["column"], False)]),
         ])
+    if name in ("start_session", "record_decision", "get_session"):
+        return table(["stage", "status", "versions"], [
+            (f"<code>{esc(st['stage'])}</code>", esc(st["status"]), esc(", ".join(f"v{v['version']} {v['status']}" for v in st["versions"]) or "-")) for st in data["stages"]
+        ]) + f'<div class="label">Allowed next</div><pre>{esc(chr(10).join(data["allowed_next"]) or "nothing, session closed")}</pre>'
+    if name == "submit_stage":
+        return f'<div class="banner info">Recorded version {data["version"]} ({esc(data["status"])}), sha256 <code>{esc(data["sha256"][:12])}</code></div>'
+    if name == "list_sessions":
+        return table(["session", "flow", "status", "current stage"], [(f"<code>{esc(x['session_id'][:8])}</code>", esc(x["flow"]), esc(x["status"]), esc(x["current_stage"] or "-")) for x in data["sessions"]])
+    if name == "compile_report":
+        return "".join(f'<div class="banner ok">Written: <code>{esc(Path(a["path"]).name)}</code> ({a["bytes"]} bytes)</div>' for a in data["artifacts"])
     if name == "write_artifact":
         return f'<div class="banner ok">Written: <code>{esc(Path(data["path"]).name)}</code> ({data["bytes"]} bytes) inside the output folder</div>'
     return ""
@@ -124,6 +144,15 @@ def section(i, name, desc, read_only, args, data, error) -> str:
             f'<details><summary>raw JSON result</summary><pre>{raw}</pre></details></section>')
 
 
+async def approve_rest(client, sid: str) -> None:
+    """Approve the remaining stages without a gallery section, so the final-approval tools can be shown."""
+    view = (await client.call_tool("get_session", {"session_id": sid})).structured_content
+    for st in view["stages"]:
+        if st["status"] != "approved":
+            v = (await client.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}."})).structured_content["version"]
+            await client.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v, "decision": "approve"})
+
+
 async def run(demo_out: Path) -> str:
     settings = load_settings({
         "DMA_SMX_DIR": str(FIX / "smx"),
@@ -133,9 +162,15 @@ async def run(demo_out: Path) -> str:
     })
     async with Client(build_server(DmaTools(settings))) as client:
         tools = {t.name: t for t in (await client.list_tools()).tools}
-        parts, nav = [], []
+        parts, nav, sid = [], [], ""
         for i, (name, args) in enumerate(CALLS):
+            if name == "_approve_rest":
+                await approve_rest(client, sid)
+                continue
+            args = {k: (sid if v == "$sid" else v) for k, v in args.items()}
             result = await client.call_tool(name, args)
+            if name == "start_session":
+                sid = result.structured_content["session_id"]
             error = result.content[0].text if result.is_error else None
             t = tools[name]
             parts.append(section(i, name, t.description, t.annotations.read_only_hint, args, result.structured_content, error))

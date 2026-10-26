@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from mcp import Client
 
@@ -6,7 +8,8 @@ from dma.config import load_settings
 from dma.server import build_server
 from dma.tools import DmaTools
 
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "write_artifact"}
+WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions"} | WRITE_TOOLS
 
 
 @pytest.fixture
@@ -27,7 +30,7 @@ async def test_lists_tools_with_read_only_hints(server):
     assert set(tools) == EXPECTED_TOOLS
     for name, t in tools.items():
         assert t.description
-        assert t.annotations.read_only_hint is (name != "write_artifact")
+        assert t.annotations.read_only_hint is (name not in WRITE_TOOLS)
 
 
 @pytest.mark.anyio
@@ -65,12 +68,78 @@ async def test_lookup_and_lineage_tools(server):
     assert sql.structured_content["sources"][0]["table"] == "brnz_fleetops.booking"
 
 
+async def approved_session(c, flow="lineage"):
+    started = (await c.call_tool("start_session", {"flow": flow, "scope": "synthetic_fleet_eip f_booking"})).structured_content
+    sid = started["session_id"]
+    for st in started["stages"]:
+        v = (await c.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": f"APPROVED {st['stage']}"})).structured_content
+        r = await c.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v["version"], "decision": "approve"})
+        assert not r.is_error, r.content
+    return sid
+
+
 @pytest.mark.anyio
 async def test_write_artifact_refuses_escape_and_writes_inside(server, tmp_path):
     async with Client(server) as c:
-        bad = await c.call_tool("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "x"})
-        good = await c.call_tool("write_artifact", {"kind": "findings_md", "name": "review", "content": "# Findings\n"})
+        sid = await approved_session(c)
+        bad = await c.call_tool("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "x", "session_id": sid})
+        good = await c.call_tool("write_artifact", {"kind": "findings_md", "name": "review", "content": "# Findings\n", "session_id": sid})
+        view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
     assert bad.is_error
     assert not (tmp_path / "escape.md").exists()
     written = list((tmp_path / "output").glob("*_review.md"))
     assert len(written) == 1 and good.structured_content["path"] == str(written[0])
+    assert view["artifacts"] == [str(written[0])]
+
+
+@pytest.mark.anyio
+async def test_write_artifact_blocked_until_final_approval(server, tmp_path):
+    args = {"kind": "findings_md", "name": "early", "content": "x"}
+    async with Client(server) as c:
+        missing = await c.call_tool("write_artifact", args)
+        unknown = await c.call_tool("write_artifact", {**args, "session_id": "0" * 32})
+        sid = (await c.call_tool("start_session", {"flow": "review", "scope": "model X"})).structured_content["session_id"]
+        fresh = await c.call_tool("write_artifact", {**args, "session_id": sid})
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "scope"})
+        await c.call_tool("record_decision", {"session_id": sid, "stage": "scope", "version": 1, "decision": "approve"})
+        partial = await c.call_tool("write_artifact", {**args, "session_id": sid})
+        report = await c.call_tool("compile_report", {"session_id": sid})
+    assert missing.is_error and unknown.is_error and fresh.is_error and report.is_error
+    assert partial.is_error and "blocked" in partial.content[0].text and "'findings'" in partial.content[0].text
+    assert not list((tmp_path / "output").glob("*.md"))
+
+
+@pytest.mark.anyio
+async def test_record_decision_refuses_inferred_words(server):
+    async with Client(server) as c:
+        sid = (await c.call_tool("start_session", {"flow": "review", "scope": "model X"})).structured_content["session_id"]
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "scope"})
+        vague = await c.call_tool("record_decision", {"session_id": sid, "stage": "scope", "version": 1, "decision": "looks fine"})
+        skip = await c.call_tool("submit_stage", {"session_id": sid, "stage": "intake", "content": "x"})
+    assert vague.is_error and skip.is_error
+
+
+@pytest.mark.anyio
+async def test_compile_report_uses_approved_content_only(server, tmp_path):
+    async with Client(server) as c:
+        sid = (await c.call_tool("start_session", {"flow": "lineage", "scope": "f_booking"})).structured_content["session_id"]
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "SUPERSEDED scope"})
+        await c.call_tool("record_decision", {"session_id": sid, "stage": "scope", "version": 1, "decision": "suggest_changes", "note": "add the | pipe column"})
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "APPROVED scope"})
+        await c.call_tool("record_decision", {"session_id": sid, "stage": "scope", "version": 2, "decision": "approve"})
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "bronze_dependencies", "content": "DISCARDED bronze"})
+        await c.call_tool("record_decision", {"session_id": sid, "stage": "bronze_dependencies", "version": 1, "decision": "disapprove", "note": "wrong manifest", "then": "redo"})
+        for stage in ("bronze_dependencies", "column_lineage", "diagram"):
+            v = (await c.call_tool("submit_stage", {"session_id": sid, "stage": stage, "content": f"APPROVED {stage}"})).structured_content["version"]
+            await c.call_tool("record_decision", {"session_id": sid, "stage": stage, "version": v, "decision": "approve"})
+        r = await c.call_tool("compile_report", {"session_id": sid})
+    assert not r.is_error, r.content
+    paths = [a["path"] for a in r.structured_content["artifacts"]]
+    md = open(paths[0], encoding="utf-8").read()
+    data = json.loads(open(paths[1], encoding="utf-8").read())
+    assert "SUPERSEDED" not in md and "DISCARDED" not in md
+    assert all(f"APPROVED {s}" in md for s in ("scope", "bronze_dependencies", "column_lineage", "diagram"))
+    assert "wrong manifest" in md and "add the \\| pipe column" in md
+    assert [s["content"] for s in data["approved_stages"]] == ["APPROVED scope", "APPROVED bronze_dependencies", "APPROVED column_lineage", "APPROVED diagram"]
+    assert [e["decision"] for e in data["decision_log"]] == ["suggest_changes", "approve", "disapprove", "approve", "approve", "approve"]
+    assert "SUPERSEDED" not in json.dumps(data["approved_stages"])

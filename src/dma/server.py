@@ -16,7 +16,9 @@ WRITES_OUTPUT = ToolAnnotations(read_only_hint=False, destructive_hint=False, id
 INSTRUCTIONS = (
     "Read-only assistant for lakehouse SMX data models (Bronze, Silver Staging, Silver IDM, Gold). "
     "Use run_rules for every deterministic check instead of re-deriving it. "
-    "write_artifact is the only tool that writes, and only into the output folder."
+    "Every stage goes through the step gate: submit_stage, show the output, then record_decision with the modeller's exact word "
+    "(approve, suggest_changes or disapprove). Silence or vague replies are not decisions: ask again. "
+    "compile_report and write_artifact only work after the final stage is approved, and only write into the output folder."
 )
 
 TOOLS = [
@@ -27,7 +29,13 @@ TOOLS = [
     ("run_rules", "Run the deterministic rules (LAYER-001, FACT-001, NAME-001, GOLD-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
     ("dbt_upstream", "List the bronze source tables a dbt model depends on, from the dbt manifest depends_on graph.", READ_ONLY),
     ("sql_column_lineage", "Trace one output column of a SQL statement to its source table columns (redshift, databricks or spark dialect).", READ_ONLY),
-    ("write_artifact", "Write a new artifact into the output folder. Never overwrites and never writes anywhere else.", WRITES_OUTPUT),
+    ("start_session", "Start a gated review, build or lineage session. Returns the session id and its ordered stages. Call once at the start of a playbook.", WRITES_OUTPUT),
+    ("submit_stage", "Record the output of the next stage as a new version before showing it to the modeller. Only the stage after the last approved one is accepted.", WRITES_OUTPUT),
+    ("record_decision", "Record the modeller's explicit decision on a stage version: approve, suggest_changes (comment required) or disapprove (reason and redo, reopen or end required).", WRITES_OUTPUT),
+    ("get_session", "Show a session: current stage, every version and its status, the decision log and what is allowed next. Use to resume.", READ_ONLY),
+    ("list_sessions", "List gate sessions in the output folder with flow, scope, status and current stage.", READ_ONLY),
+    ("compile_report", "After the final stage is approved, write the report and decisions artifacts from approved stage outputs plus the full decision log.", WRITES_OUTPUT),
+    ("write_artifact", "Write a new artifact into the output folder for a session whose final stage is approved. Never overwrites and never writes anywhere else.", WRITES_OUTPUT),
 ]
 
 

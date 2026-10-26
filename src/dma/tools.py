@@ -1,13 +1,15 @@
 """Tool logic as plain methods. Transport-agnostic: server.py only registers these."""
 
+import json
 from collections import Counter
 from functools import cached_property
-from typing import Annotated
+from typing import Annotated, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from dma.config import Settings, load_yaml
+from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.lineage.dbt_manifest import DbtManifest, DbtUpstream, ManifestError
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
@@ -38,12 +40,29 @@ class RuleRun(BaseModel):
     findings: list[Finding]
 
 
+class SessionList(BaseModel):
+    sessions: list[SessionSummary]
+
+
+class CompiledReport(BaseModel):
+    session_id: str
+    artifacts: list[WrittenArtifact]
+
+
+def _cell(text: str | None) -> str:
+    return (text or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 class DmaTools:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
+        try:
+            self.gate = GateStore(self.writer, load_yaml(settings.config_dir, "gates.yaml"), user=settings.user)
+        except GateError as e:
+            raise ToolError(str(e)) from e
 
     @cached_property
     def index(self) -> ModelIndex:
@@ -116,13 +135,91 @@ class DmaTools:
         except LineageError as e:
             raise ToolError(str(e)) from e
 
+    def start_session(
+        self,
+        flow: Annotated[Literal["review", "build", "lineage"], Field(description="Which playbook this session follows.")],
+        scope: Annotated[str, Field(description="What the session covers, e.g. model name and tables, or Power BI report and workspace IDs.")],
+    ) -> SessionView:
+        try:
+            return self.gate.start(flow, scope)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def submit_stage(
+        self,
+        session_id: Annotated[str, Field(description="Session id from start_session.")],
+        stage: Annotated[str, Field(description="The stage being presented. Must be the next stage after the last approved one.")],
+        content: Annotated[str, Field(description="The full stage output shown to the modeller: output, evidence and assumptions.")],
+    ) -> StageVersion:
+        try:
+            return self.gate.submit(session_id, stage, content)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def record_decision(
+        self,
+        session_id: Annotated[str, Field(description="Session id from start_session.")],
+        stage: Annotated[str, Field(description="Stage the modeller decided on.")],
+        version: Annotated[int, Field(description="Version returned by submit_stage.")],
+        decision: Annotated[Decision, Field(description="The modeller's explicit word only: approve, suggest_changes or disapprove. Never infer it from silence or vague replies.")],
+        note: Annotated[str | None, Field(description="Comment (required for suggest_changes) or reason (required for disapprove), in the modeller's words.")] = None,
+        then: Annotated[After | None, Field(description="Disapprove only, chosen by the modeller: redo this stage, reopen an earlier stage, or end the session.")] = None,
+        reopen_stage: Annotated[str | None, Field(description="Disapprove with then=reopen only: the earlier stage to reopen. It and every later stage are invalidated.")] = None,
+    ) -> SessionView:
+        try:
+            return self.gate.decide(session_id, stage, version, decision, note, then, reopen_stage)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def get_session(self, session_id: Annotated[str, Field(description="Session id from start_session or list_sessions.")]) -> SessionView:
+        try:
+            return self.gate.view(session_id)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def list_sessions(self) -> SessionList:
+        return SessionList(sessions=self.gate.list_sessions())
+
+    def compile_report(self, session_id: Annotated[str, Field(description="Session whose final stage is approved.")]) -> CompiledReport:
+        try:
+            outputs = self.gate.approved_outputs(session_id)
+            view = self.gate.view(session_id)
+            md = [f"# {view.flow.capitalize()} report", "", f"- Session: `{session_id}`", f"- Scope: {_cell(view.scope)}", f"- Started by {view.created_by} at {view.created_at}", "", "## **1. Approved stages**", ""]
+            for i, o in enumerate(outputs, 1):
+                md += [f"### *1.{i}. {o['stage']} (version {o['version']})*", "", o["content"].rstrip(), ""]
+            md += ["## **2. Decision log**", "", "| # | Stage | Version | Decision | Then | Note | User | UTC time |", "|---|---|---|---|---|---|---|---|"]
+            for i, e in enumerate(view.decision_log, 1):
+                then = e.then + (f" {e.reopen_stage}" if e.reopen_stage else "") if e.then else ""
+                md.append(f"| {i} | {e.stage} | {e.version} | {e.decision} | {then} | {_cell(e.note)} | {_cell(e.user)} | {e.ts} |")
+            decisions = {
+                "session_id": session_id,
+                "flow": view.flow,
+                "scope": view.scope,
+                "approved_stages": [{"stage": o["stage"], "version": o["version"], "sha256": o["sha256"], "content": o["content"]} for o in outputs],
+                "decision_log": [e.model_dump() for e in view.decision_log],
+            }
+            stem = f"{view.flow}_{session_id[:8]}"
+            written = [
+                self.writer.write("findings_md", f"{stem}_report", "\n".join(md) + "\n"),
+                self.writer.write("decisions_json", f"{stem}_decisions", json.dumps(decisions, ensure_ascii=False)),
+            ]
+            for w in written:
+                self.gate.record_artifact(session_id, w.path)
+            return CompiledReport(session_id=session_id, artifacts=written)
+        except (GateError, WriterError) as e:
+            raise ToolError(str(e)) from e
+
     def write_artifact(
         self,
         kind: Annotated[ArtifactKind, Field(description="findings_md, decisions_json, proposed_smx_xlsx (JSON {sheet: [rows]}) or lineage_mermaid.")],
         name: Annotated[str, Field(description="File name stem, letters, digits, '_', '-', '.' only. A timestamp prefix and extension are added.")],
-        content: Annotated[str, Field(description="File content. JSON text for decisions_json and proposed_smx_xlsx.")],
+        content: Annotated[str, Field(description="File content. JSON text for decisions_json and proposed_smx_xlsx. Use only approved stage outputs.")],
+        session_id: Annotated[str, Field(description="Session whose final stage is approved. Writing is refused before that.")],
     ) -> WrittenArtifact:
         try:
-            return self.writer.write(kind, name, content)
-        except WriterError as e:
+            self.gate.require_complete(session_id)
+            written = self.writer.write(kind, name, content)
+            self.gate.record_artifact(session_id, written.path)
+            return written
+        except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
