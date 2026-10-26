@@ -117,3 +117,84 @@ def test_invalid_json_rejected(writer, out):
     with pytest.raises(WriterError, match="JSON"):
         writer.write("decisions_json", "bad", "{not json")
     assert not any(out.glob("*.json"))
+
+
+SID = "0123456789abcdef0123456789abcdef"
+BAD_SESSION_IDS = ["", "..", "../" + SID[:29], SID.upper(), SID[:31], SID + "0", SID[:31] + "/", SID[:31] + "\\", "C:" + SID[:30], None]
+
+
+@pytest.mark.parametrize("session_id", BAD_SESSION_IDS)
+def test_session_log_refuses_bad_ids(writer, tmp_path, session_id):
+    with pytest.raises(WriterError, match="session_id"):
+        writer.append_session_event(session_id, {"type": "x"}, create=True)
+    assert [p for p in tmp_path.rglob("*") if p.is_file()] == []
+
+
+def test_session_log_is_append_only(writer, out):
+    writer.append_session_event(SID, {"n": 1}, create=True)
+    writer.append_session_event(SID, {"n": 2})
+    assert writer.read_session_events(SID) == [{"n": 1}, {"n": 2}]
+    assert (out / ".sessions" / SID / "events.jsonl").is_file()
+    with pytest.raises(FileExistsError):
+        writer.append_session_event(SID, {"n": 3}, create=True)
+    assert writer.read_session_events(SID) == [{"n": 1}, {"n": 2}]
+
+
+def test_session_append_needs_existing_session(writer):
+    with pytest.raises(WriterError, match="unknown session"):
+        writer.append_session_event(SID, {"n": 1})
+    with pytest.raises(WriterError, match="unknown session"):
+        writer.read_session_events(SID)
+
+
+def test_session_event_size_cap(writer, monkeypatch):
+    import dma.writer as w
+
+    writer.append_session_event(SID, {"n": 1}, create=True)
+    with pytest.raises(WriterError, match="larger than"):
+        writer.append_session_event(SID, {"blob": "x" * w.MAX_EVENT_BYTES})
+    monkeypatch.setattr(w, "MAX_SESSION_BYTES", 15)
+    with pytest.raises(WriterError, match="exceed"):
+        writer.append_session_event(SID, {"n": 2})
+    assert writer.read_session_events(SID) == [{"n": 1}]
+
+
+def test_session_dir_symlink_refused(writer, out, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    try:
+        os.symlink(outside, out / ".sessions", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this machine")
+    with pytest.raises(WriterError, match="symlink"):
+        writer.append_session_event(SID, {"n": 1}, create=True)
+    assert list(outside.iterdir()) == []
+
+
+def test_session_dir_junction_refused(writer, out, tmp_path):
+    if os.name != "nt":
+        pytest.skip("junctions are Windows only")
+    import subprocess
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (out / ".sessions").mkdir(parents=True)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(out / ".sessions" / SID), str(outside)], capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("could not create a junction")
+    with pytest.raises(WriterError):
+        writer.append_session_event(SID, {"n": 1})
+    assert list(outside.iterdir()) == []
+
+
+def test_list_session_ids(writer, out):
+    assert writer.list_session_ids() == []
+    writer.append_session_event(SID, {"n": 1}, create=True)
+    (out / ".sessions" / "not-a-session").mkdir()
+    assert writer.list_session_ids() == [SID]
+
+
+def test_artifacts_never_land_in_sessions(writer):
+    with pytest.raises(WriterError):
+        writer.safe_path(".sessions/x.md")

@@ -1,4 +1,4 @@
-"""The only module allowed to write files. Writes new files inside the output root and nowhere else."""
+"""The only module allowed to write files. Writes new artifacts and append-only session logs inside the output root and nowhere else."""
 
 import io
 import json
@@ -19,6 +19,11 @@ EXTENSIONS: dict[str, str] = {
 }
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 MAX_BYTES = 5 * 1024 * 1024
+SESSIONS_DIR = ".sessions"
+EVENTS_FILE = "events.jsonl"
+SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+MAX_EVENT_BYTES = 2 * 1024 * 1024
+MAX_SESSION_BYTES = 50 * 1024 * 1024
 
 
 class WriterError(ValueError):
@@ -79,6 +84,53 @@ class ArtifactWriter:
         except FileExistsError as e:
             raise WriterError(f"refusing to overwrite existing file {target.name}") from e
         return WrittenArtifact(kind=kind, path=str(target), bytes=len(data))
+
+    def session_log(self, session_id: str) -> Path:
+        """Path of output/.sessions/<id>/events.jsonl. Raises WriterError on a bad id, a symlink or a junction anywhere on the way."""
+        if not isinstance(session_id, str) or not SESSION_ID_RE.match(session_id):
+            raise WriterError(f"session_id must be 32 lowercase hex characters, got {session_id!r}")
+        sessions = self.root / SESSIONS_DIR
+        folder = sessions / session_id
+        target = folder / EVENTS_FILE
+        for p in (sessions, folder, target):
+            if p.is_symlink():
+                raise WriterError(f"refusing to use a symlink in the session path: {p.name}")
+        # resolve() follows junctions too, so a redirected folder no longer matches the expected path.
+        if target.resolve() != target:
+            raise WriterError(f"session path escapes the output root: {session_id}")
+        return target
+
+    def append_session_event(self, session_id: str, record: dict, create: bool = False) -> None:
+        """Append one JSON line to a session log. create=True starts a new session and fails if it exists. Lines are never rewritten."""
+        target = self.session_log(session_id)
+        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        if len(line) > MAX_EVENT_BYTES:
+            raise WriterError(f"session event larger than {MAX_EVENT_BYTES} bytes")
+        if create:
+            target.parent.mkdir(parents=True, exist_ok=False)
+            self.session_log(session_id)
+            mode = "xb"
+        else:
+            if not target.is_file():
+                raise WriterError(f"unknown session: {session_id}")
+            if target.stat().st_size + len(line) > MAX_SESSION_BYTES:
+                raise WriterError(f"session log would exceed {MAX_SESSION_BYTES} bytes")
+            mode = "ab"
+        with open(target, mode) as fh:
+            fh.write(line)
+
+    def read_session_events(self, session_id: str) -> list[dict]:
+        target = self.session_log(session_id)
+        if not target.is_file():
+            raise WriterError(f"unknown session: {session_id}")
+        with open(target, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def list_session_ids(self) -> list[str]:
+        sessions = self.root / SESSIONS_DIR
+        if not sessions.is_dir() or sessions.is_symlink():
+            return []
+        return sorted(p.name for p in sessions.iterdir() if SESSION_ID_RE.match(p.name) and not p.is_symlink() and (p / EVENTS_FILE).is_file())
 
     def _render(self, kind: str, content: str) -> bytes:
         if kind == "decisions_json":
