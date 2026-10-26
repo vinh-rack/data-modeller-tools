@@ -1,0 +1,15 @@
+# Step gate flows (ARCHITECTURE.md section 3). Each flow is an ordered list of gated stages.
+# Every stage ends at Approve, Disapprove or Suggest changes. Approving the last stage unlocks compile_report and write_artifact,
+# so the writing step (review artifacts, build compile, lineage compile) comes after the last gate and is not a stage here.
+# A session keeps the stage list it started with, so editing this file does not change sessions already in progress.
+
+flows:
+  # REQUIREMENTS FR-R6, stages 1 to 6. Stage 7 (artifacts) runs after the last gate.
+  review: [scope, intake, structural_review, semantic_review, hard_rule_checklist, findings]
+  # ARCHITECTURE section 4, gates G1 to G8. Entity logic and bronze identification share gate G4.
+  build: [scope, powerbi_intake, source_tables, bronze_identification, silver_staging, silver_idm, gold, rules_pass]
+  # FR-L1 to FR-L3. Compile runs after the last gate.
+  lineage: [scope, bronze_dependencies, column_lineage, diagram]
+
+# Largest stage output accepted by submit_stage, in UTF-8 bytes.
+max_content_bytes: 1000000

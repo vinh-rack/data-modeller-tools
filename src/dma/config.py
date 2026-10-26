@@ -1,5 +1,6 @@
 """Settings from env vars and YAML config. Relative paths resolve against the current directory."""
 
+import getpass
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,14 @@ class Settings:
     output_dir: Path
     config_dir: Path
     transport: str
+    user: str
+
+
+def _os_user() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
 
 
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
@@ -26,6 +35,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         output_dir=Path(env.get("DMA_OUTPUT_DIR", "output")).resolve(),
         config_dir=Path(env.get("DMA_CONFIG_DIR", "config")).resolve(),
         transport=env.get("DMA_TRANSPORT", "stdio").strip() or "stdio",
+        # Recorded on every gate decision. The server cannot verify it, so it is an audit label, not authentication.
+        user=env.get("DMA_USER", "").strip() or _os_user(),
     )
 
 
