@@ -15,6 +15,8 @@ These rules apply to every agent and every session working in this repo (Claude 
 
 - Read-only by design. No tool may modify source systems or baseline SMX workbooks. SMX files are opened with `openpyxl.load_workbook(read_only=True, data_only=True)` and never saved.
 - Only `src/dma/writer.py` writes files, and only inside the output root (`DMA_OUTPUT_DIR`, default `output/`). The path check is enforced in code and covered by `tests/test_writer_sandbox.py`. Never weaken it.
+- The writer creates two things only: new artifact files in the output root (never overwritten), and append-only step gate logs at `output/.sessions/<session_id>/events.jsonl` (lines are never rewritten or deleted). `src/dma/gate.py` reads and appends through the writer and does no file IO of its own.
+- Every stage passes the step gate (`config/gates.yaml`). `compile_report` and `write_artifact` are refused until the session's final stage is approved. Do not add a write path that skips `GateStore.require_complete`.
 - No real credentials in code or config. Use env vars, keep `.env.example` as the template, `.env` stays git-ignored.
 - No real client data in the repo. Tests use synthetic fixtures only (`tests/fixtures/`). `samples/` and client documents in `docs/` are git-ignored and must never be copied into tracked files.
 - Never invent the SMX template layout. Sheet and header mapping lives in `config/smx_mapping.yaml`. If a layout is unknown, stop and ask.
