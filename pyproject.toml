@@ -13,6 +13,12 @@ dependencies = [
     "python-dotenv>=1.2",
 ]
 
+[project.optional-dependencies]
+# Parses the Apache Arrow (LZ4) response of Execute DAX Queries In Group, the route to INFO functions and M transforms.
+pbi-arrow = [
+    "pyarrow>=26",
+]
+
 [project.scripts]
 dma-server = "dma.server:main"
 
