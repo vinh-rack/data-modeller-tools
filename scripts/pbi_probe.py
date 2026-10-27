@@ -13,11 +13,9 @@ from typing import Callable
 
 from dotenv import load_dotenv
 
-from dma.connectors.powerbi import CLASSIC_QUERY, INFO_QUERY, PowerBIClient, PowerBIError, cell, check_id, parse_arrow
+from dma.connectors.powerbi import CLASSIC_QUERY, INFO_COLUMNS, INFO_MEASURES, INFO_PARTITIONS, INFO_QUERY, PowerBIClient, PowerBIError, cell, check_id, parse_arrow
 
 ROOT = Path(__file__).resolve().parents[1]
-# The classic endpoint docs say INFO functions are not supported. INFO.VIEW.* are documented as usable in calculated tables, so this checks whether they still work there.
-CLASSIC_INFO_VIEW_QUERY = 'EVALUATE SELECTCOLUMNS(INFO.VIEW.COLUMNS(), "column", [Name])'
 
 
 class Probe:
@@ -77,7 +75,9 @@ def main() -> int:
     def sources(group: str | None) -> Callable[[], str]:
         def run() -> str:
             items = client.get_datasources(dataset_id, group)
-            return f"{len(items)} source(s): " + ", ".join(f"{s.get('datasourceType')} {(s.get('connectionDetails') or {}).get('server', '')}/{(s.get('connectionDetails') or {}).get('database', '')}" for s in items)
+            def target(d: dict) -> str:
+                return d.get("url") or d.get("path") or f"{d.get('server', '')}/{d.get('database', '')}"
+            return f"{len(items)} source(s): " + ", ".join(f"{s.get('datasourceType')} {target(s.get('connectionDetails') or {})}" for s in items)
         return run
 
     p.step("3", "GET datasets/{id}/datasources", sources(None))
@@ -96,11 +96,18 @@ def main() -> int:
         return f"{len(r.rows)} columns in {len(tables)} tables: {', '.join(tables)}" + (" (truncated)" if r.truncated else "")
 
     p.step("5", "POST executeQueries COLUMNSTATISTICS names", columns)
-    def info_view_classic() -> str:
-        r = client.execute_queries(dataset_id, CLASSIC_INFO_VIEW_QUERY, workspace_id)
-        return f"{len(r.rows)} rows, so INFO.VIEW works on the classic endpoint"
 
-    p.step("5b", "POST executeQueries INFO.VIEW.COLUMNS()", info_view_classic)
+    # The classic endpoint docs say INFO functions are not supported, so these check what pbi_model_metadata can still get there.
+    def classic_info(query: str, field: str, what: str) -> Callable[[], str]:
+        def run() -> str:
+            r = client.execute_queries(dataset_id, query, workspace_id)
+            filled = sum(1 for x in r.rows if cell(x, field))
+            return f"{len(r.rows)} {what}, {filled} with {field}"
+        return run
+
+    p.step("5b", "POST executeQueries INFO.VIEW.COLUMNS()", classic_info(INFO_COLUMNS, "data_type", "columns"))
+    p.step("5c", "POST executeQueries INFO.VIEW.MEASURES()", classic_info(INFO_MEASURES, "expression", "measures"))
+    p.step("5d", "POST executeQueries INFO.PARTITIONS()", classic_info(INFO_PARTITIONS, "query_definition", "partitions"))
 
     def info() -> str:
         resp = client.request("POST", f"groups/{workspace_id}/datasets/{dataset_id}/executeDaxQueries", {"query": INFO_QUERY, "resultSetRowCountLimit": client.max_rows})
@@ -125,7 +132,7 @@ def main() -> int:
     print()
     print(f"Q8  tenant setting 'Dataset Execute Queries REST API' on: {'yes' if p.ok.get('4') else 'no or no build permission, see call 4'}")
     q9 = p.ok.get("6")
-    print(f"Q9  INFO route returns metadata: {'yes, see call 6 for M coverage' if q9 else 'not tested' if q9 is None else 'no, see call 6'}")
+    print(f"Q9  INFO route returns metadata: Arrow {'yes, see call 6 for M coverage' if q9 else 'not tested' if q9 is None else 'no, see call 6'}; classic measures {'yes' if p.ok.get('5c') else 'no'}, classic M {'yes' if p.ok.get('5d') else 'no'} (see 5c and 5d for counts)")
     in_group = "" if p.ok.get("3b") is None else f", group path {'yes' if p.ok['3b'] else 'no, see call 3b'}"
     print(f"Q10 datasources call works: {'yes' if p.ok.get('3') else 'no, see call 3'}{in_group} (in My workspace you own the dataset, so a pass does not prove read access alone is enough)")
     g = p.ok.get("1b")
