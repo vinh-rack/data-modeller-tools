@@ -166,6 +166,10 @@ def test_execute_queries_tenant_hint_and_query_error():
     send = FakeSend(Response(403, {}, b'{"error":{"code":"PowerBINotAuthorizedException"}}'))
     with pytest.raises(PowerBIError, match="Dataset Execute Queries REST API"):
         client(send).execute_queries(DATASET, 'EVALUATE ROW("ok", 1)')
+    dax_400 = {"error": {"code": "DatasetExecuteQueriesError", "pbi.error": {"code": "DatasetExecuteQueriesError", "details": [{"code": "DetailsMessage", "detail": {"type": 1, "value": "INFO.PARTITIONS is not supported"}}]}}}
+    with pytest.raises(PowerBIError) as e:
+        client(FakeSend(Response(400, {}, json.dumps(dax_400).encode()))).execute_queries(DATASET, "EVALUATE INFO.PARTITIONS()")
+    assert "INFO.PARTITIONS is not supported" in str(e.value) and "tenant setting" not in str(e.value)
     send = FakeSend(ok({"results": [{"tables": [{"error": {"code": "DAXQueryFailure", "message": "INFO not supported"}}]}]}))
     with pytest.raises(PowerBIError, match="INFO not supported"):
         client(send).execute_queries(DATASET, "EVALUATE INFO.VIEW.COLUMNS()")

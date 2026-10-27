@@ -48,6 +48,7 @@ class PowerBIError(RuntimeError):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)
         self.status = status
+        self.code = ""
 
 
 class PowerBIAuthError(PowerBIError):
@@ -116,10 +117,21 @@ def _retry_after(headers: Mapping[str, str]) -> float | None:
         return None
 
 
+def _error_code(body: bytes) -> str:
+    try:
+        return str((json.loads(body).get("error") or {}).get("code") or "")
+    except (ValueError, AttributeError):
+        return ""
+
+
 def _error_text(body: bytes) -> str:
     try:
         err = json.loads(body).get("error") or {}
         text = " ".join(str(err.get(k)) for k in ("code", "message") if err.get(k))
+        # Execute Queries puts the DAX error itself in pbi.error details, which the plain code does not say.
+        details = [str((d.get("detail") or {}).get("value")) for d in (err.get("pbi.error") or {}).get("details") or [] if (d.get("detail") or {}).get("value")]
+        if details:
+            text = f"{text}: {' '.join(details)}"
         if text:
             return text
     except (ValueError, AttributeError):
@@ -186,7 +198,9 @@ class PowerBIClient:
         if resp.status == 429:
             raise PowerBIError("Power BI returned 429 Too Many Requests and Retry-After was missing or did not help. Wait a minute and try again.", status=429)
         if resp.status >= 400:
-            raise PowerBIError(self._redact(f"{method} {path} returned HTTP {resp.status}: {_error_text(resp.body)}"), status=resp.status)
+            err = PowerBIError(self._redact(f"{method} {path} returned HTTP {resp.status}: {_error_text(resp.body)}"), status=resp.status)
+            err.code = _error_code(resp.body)
+            raise err
         self._cache[key] = resp
         return resp
 
@@ -227,7 +241,8 @@ class PowerBIClient:
         try:
             data = self._json("POST", path, body)
         except PowerBIError as e:
-            if e.status in (400, 403):
+            # In Phase 0 a DAX error (INFO.PARTITIONS) came back as 400 DatasetExecuteQueriesError while the tenant setting was on, so that code gets no tenant hint.
+            if e.status in (400, 403) and e.code != "DatasetExecuteQueriesError":
                 raise PowerBIError(f"{e} {TENANT_HINT}", status=e.status) from None
             raise
         result = (data.get("results") or [{}])[0]
