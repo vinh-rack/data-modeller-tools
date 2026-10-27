@@ -136,7 +136,7 @@ def main() -> int:
     in_group = "" if p.ok.get("3b") is None else f", group path {'yes' if p.ok['3b'] else 'no, see call 3b'}"
     print(f"Q10 datasources call works: {'yes' if p.ok.get('3') else 'no, see call 3'}{in_group} (in My workspace you own the dataset, so a pass does not prove read access alone is enough)")
     g = p.ok.get("1b")
-    print(f"Group paths work for My workspace: {'yes, groups/{ws}/... can always be used' if g else 'not tested' if g is None else 'no, keep the My workspace paths'}")
+    print(f"Group paths work for My workspace: GET {'yes' if g else 'not tested' if g is None else 'no, see call 1b'}" + (f"; executeQueries {'yes' if p.ok.get('4') else 'no'} (calls 4 to 5d used groups/{{ws}}/)" if workspace_id else ""))
     return 0
 
 
