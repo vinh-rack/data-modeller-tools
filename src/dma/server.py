@@ -11,7 +11,8 @@ from dma.config import load_settings
 from dma.tools import DmaTools
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
-WRITES_OUTPUT = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
+READS_POWER_BI = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
+WRITES_OUTPUT =ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
 
 INSTRUCTIONS = (
     "Read-only assistant for lakehouse SMX data models (Bronze, Silver Staging, Silver IDM, Gold). "
@@ -29,7 +30,9 @@ TOOLS = [
     ("run_rules", "Run the deterministic rules (LAYER-001, FACT-001, NAME-001, GOLD-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
     ("dbt_upstream", "List the bronze source tables a dbt model depends on, from the dbt manifest depends_on graph.", READ_ONLY),
     ("sql_column_lineage", "Trace one output column of a SQL statement to its source table columns (redshift, databricks or spark dialect).", READ_ONLY),
-    ("start_session", "Start a gated review, build or lineage session. Returns the session id and its ordered stages. Call once at the start of a playbook.", WRITES_OUTPUT),
+    ("pbi_get_report", "Read a Power BI report, its semantic model and its data sources by ID (read-only). Rejects paginated reports and a dataset ID that does not match the report.", READS_POWER_BI),
+    ("pbi_model_metadata", "List the semantic model's tables, columns, measures and Power Query (M) transforms by report ID, with the routes tried. Unavailable parts are marked, not guessed.", READS_POWER_BI),
+    ("start_session","Start a gated review, build or lineage session. Returns the session id and its ordered stages. Call once at the start of a playbook.", WRITES_OUTPUT),
     ("submit_stage", "Record the output of the next stage as a new version before showing it to the modeller. Only the stage after the last approved one is accepted.", WRITES_OUTPUT),
     ("record_decision", "Record the modeller's explicit decision on a stage version: approve, suggest_changes (comment required) or disapprove (reason and redo, reopen or end required).", WRITES_OUTPUT),
     ("get_session", "Show a session: current stage, every version and its status, the decision log and what is allowed next. Use to resume.", READ_ONLY),

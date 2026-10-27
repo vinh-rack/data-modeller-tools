@@ -9,7 +9,7 @@ from dma.server import build_server
 from dma.tools import DmaTools
 
 WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions"} | WRITE_TOOLS
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
 @pytest.fixture

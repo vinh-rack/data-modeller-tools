@@ -13,8 +13,10 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
+
+from pydantic import BaseModel
 
 DEFAULT_BASE = "https://api.powerbi.com/v1.0/myorg"
 DEFAULT_MAX_ROWS = 5000
@@ -261,3 +263,171 @@ def parse_arrow(body: bytes, max_rows: int) -> list[QueryResult]:
             raise PowerBIError(f"DAX query failed [{meta.get('FaultCode', '')}]: {meta.get('FaultString', '')}")
         results.append(QueryResult(rows=table.slice(0, max_rows).to_pylist(), truncated=table.num_rows > max_rows))
     return results
+
+
+# Tool-facing results. Only metadata leaves this module: names, types, expressions and connection targets, never data rows.
+
+class PbiReport(BaseModel):
+    id: str
+    name: str | None
+    dataset_id: str
+    web_url: str | None
+    report_type: str | None
+    workspace_id: str | None
+
+
+class PbiDataset(BaseModel):
+    id: str
+    name: str | None
+    configured_by: str | None
+    is_refreshable: bool | None
+    target_storage_mode: str | None
+
+
+class PbiDatasource(BaseModel):
+    datasource_type: str | None
+    server: str | None
+    database: str | None
+    connection_details: dict[str, Any]
+
+
+class PbiReportInfo(BaseModel):
+    report: PbiReport
+    dataset: PbiDataset
+    datasources: list[PbiDatasource] | None
+    notes: list[str]
+
+
+class PbiColumn(BaseModel):
+    table: str | None
+    column: str | None
+    data_type: str | None = None
+    expression: str | None = None
+
+
+class PbiMeasure(BaseModel):
+    table: str | None
+    measure: str | None
+    expression: str | None
+
+
+class PbiTransform(BaseModel):
+    table: str | None
+    partition: str | None
+    m_expression: str | None
+
+
+class RouteTried(BaseModel):
+    route: str
+    endpoint: str
+    outcome: Literal["ok", "failed", "skipped"]
+    detail: str
+
+
+class PbiModelMetadata(BaseModel):
+    report_id: str
+    dataset_id: str
+    workspace_id: str | None
+    tables: list[str]
+    columns: list[PbiColumn]
+    measures: list[PbiMeasure] | None
+    measures_status: str
+    m_transforms: list[PbiTransform] | None
+    m_transforms_status: str
+    truncated: bool
+    routes_tried: list[RouteTried]
+
+
+# One Arrow call with four EVALUATE statements, which Execute DAX Queries In Group allows. The partition join follows the INFO.PARTITIONS docs example.
+INFO_QUERY = "\n".join([
+    'EVALUATE SELECTCOLUMNS(INFO.VIEW.TABLES(), "table", [Name])',
+    'EVALUATE SELECTCOLUMNS(INFO.VIEW.COLUMNS(), "table", [Table], "column", [Name], "data_type", [DataType], "type", [Type], "expression", [Expression])',
+    'EVALUATE SELECTCOLUMNS(INFO.VIEW.MEASURES(), "table", [Table], "measure", [Name], "expression", [Expression])',
+    'EVALUATE SELECTCOLUMNS(NATURALLEFTOUTERJOIN(INFO.PARTITIONS(), SELECTCOLUMNS(INFO.TABLES(), "TableID", [ID], "Table Name", [Name])), "table", [Table Name], "partition", [Name], "query_definition", [QueryDefinition])',
+])
+# Classic endpoint fallback: names only, so the Min and Max data values of COLUMNSTATISTICS never come back.
+CLASSIC_QUERY = 'EVALUATE SELECTCOLUMNS(COLUMNSTATISTICS(), "table", [Table Name], "column", [Column Name])'
+CLASSIC_NOT_AVAILABLE = "not available: the classic executeQueries endpoint does not support INFO functions"
+INFO_ENDPOINT = "POST groups/{workspace}/datasets/{dataset}/executeDaxQueries"
+
+
+def _str(v: Any) -> str | None:
+    return None if v is None or v == "" else str(v)
+
+
+def _is_row_number(name: Any, kind: Any = None) -> bool:
+    return kind == "RowNumber" or str(name or "").startswith("RowNumber-")
+
+
+def report_info(client: PowerBIClient, report_id: str, workspace_id: str | None = None, dataset_id: str | None = None) -> PbiReportInfo:
+    report = client.resolve_report(report_id, workspace_id, dataset_id)
+    ds_id = str(report["datasetId"])
+    ds = client.get_dataset(ds_id, workspace_id)
+    notes: list[str] = []
+    try:
+        sources = []
+        for s in client.get_datasources(ds_id, workspace_id):
+            details = s.get("connectionDetails") or {}
+            sources.append(PbiDatasource(datasource_type=s.get("datasourceType"), server=details.get("server"), database=details.get("database"), connection_details=details))
+    except PowerBIAuthError:
+        raise
+    except PowerBIError as e:
+        # The In Group docs say the caller needs write permission on the dataset (REQUIREMENTS Q10), so read-only users may land here.
+        sources = None
+        notes.append(f"datasources not available: {e}")
+    return PbiReportInfo(
+        report=PbiReport(id=str(report["id"]), name=report.get("name"), dataset_id=ds_id, web_url=report.get("webUrl"), report_type=report.get("reportType"), workspace_id=workspace_id),
+        dataset=PbiDataset(id=str(ds.get("id", ds_id)), name=ds.get("name"), configured_by=ds.get("configuredBy"), is_refreshable=ds.get("isRefreshable"), target_storage_mode=ds.get("targetStorageMode")),
+        datasources=sources,
+        notes=notes,
+    )
+
+
+def _from_info(results: list[QueryResult], report_id: str, ds_id: str, workspace_id: str, routes: list[RouteTried]) -> PbiModelMetadata:
+    tables, columns, measures, parts = (results + [QueryResult([], False)] * 4)[:4]
+    routes.append(RouteTried(route="info_functions", endpoint=INFO_ENDPOINT, outcome="ok", detail=f"{len(tables.rows)} tables, {len(columns.rows)} columns, {len(measures.rows)} measures, {len(parts.rows)} partitions"))
+    transforms = [PbiTransform(table=_str(cell(r, "table")), partition=_str(cell(r, "partition")), m_expression=_str(cell(r, "query_definition"))) for r in parts.rows]
+    m_status = "available" if any(t.m_expression for t in transforms) else "not available: INFO.PARTITIONS returned no query definitions (may need write or admin permission on the model)"
+    return PbiModelMetadata(
+        report_id=report_id, dataset_id=ds_id, workspace_id=workspace_id,
+        tables=[t for t in (_str(cell(r, "table")) for r in tables.rows) if t],
+        columns=[PbiColumn(table=_str(cell(r, "table")), column=_str(cell(r, "column")), data_type=_str(cell(r, "data_type")), expression=_str(cell(r, "expression"))) for r in columns.rows if not _is_row_number(cell(r, "column"), cell(r, "type"))],
+        measures=[PbiMeasure(table=_str(cell(r, "table")), measure=_str(cell(r, "measure")), expression=_str(cell(r, "expression"))) for r in measures.rows],
+        measures_status="available",
+        m_transforms=transforms,
+        m_transforms_status=m_status,
+        truncated=any(r.truncated for r in (tables, columns, measures, parts)),
+        routes_tried=routes,
+    )
+
+
+def model_metadata(client: PowerBIClient, report_id: str, workspace_id: str | None = None) -> PbiModelMetadata:
+    """Tables, columns, measures and M transforms via the best available route, or "not available" with the routes tried (FR-P5)."""
+    report = client.resolve_report(report_id, workspace_id)
+    ds_id = str(report["datasetId"]).lower()
+    routes: list[RouteTried] = []
+    if workspace_id:
+        try:
+            return _from_info(client.execute_dax_queries(ds_id, INFO_QUERY, workspace_id), report_id, ds_id, workspace_id, routes)
+        except PowerBIAuthError:
+            raise
+        except PowerBIError as e:
+            routes.append(RouteTried(route="info_functions", endpoint=INFO_ENDPOINT, outcome="failed", detail=str(e)))
+    else:
+        routes.append(RouteTried(route="info_functions", endpoint=INFO_ENDPOINT, outcome="skipped", detail="no workspace_id given; this endpoint has no My workspace path"))
+    classic_endpoint = ("POST groups/{workspace}/" if workspace_id else "POST ") + "datasets/{dataset}/executeQueries"
+    try:
+        result = client.execute_queries(ds_id, CLASSIC_QUERY, workspace_id)
+    except PowerBIAuthError:
+        raise
+    except PowerBIError as e:
+        routes.append(RouteTried(route="classic_columnstatistics", endpoint=classic_endpoint, outcome="failed", detail=str(e)))
+        raise PowerBIError("no route returned model metadata. " + " | ".join(f"{r.route} {r.outcome}: {r.detail}" for r in routes)) from None
+    routes.append(RouteTried(route="classic_columnstatistics", endpoint=classic_endpoint, outcome="ok", detail=f"{len(result.rows)} columns"))
+    cols = [PbiColumn(table=_str(cell(r, "table")), column=_str(cell(r, "column"))) for r in result.rows if not _is_row_number(cell(r, "column"))]
+    return PbiModelMetadata(
+        report_id=report_id, dataset_id=ds_id, workspace_id=workspace_id,
+        tables=sorted({c.table for c in cols if c.table}), columns=cols,
+        measures=None, measures_status=CLASSIC_NOT_AVAILABLE, m_transforms=None, m_transforms_status=CLASSIC_NOT_AVAILABLE,
+        truncated=result.truncated, routes_tried=routes,
+    )

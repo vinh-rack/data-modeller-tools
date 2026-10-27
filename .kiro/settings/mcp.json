@@ -7,7 +7,7 @@
         "DMA_TRANSPORT": "stdio"
       },
       "disabled": false,
-      "autoApprove": ["list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions"]
+      "autoApprove": ["list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "pbi_get_report", "pbi_model_metadata"]
     }
   }
 }

@@ -213,3 +213,111 @@ def test_parse_arrow_rows_and_error_rowset():
     err = pa.table({"ErrorCode": ["1"]}).replace_schema_metadata({"IsError": "true", "FaultString": "bad INFO call"})
     with pytest.raises(PowerBIError, match="bad INFO call"):
         parse_arrow(stream(err), 10)
+
+
+# report_info and model_metadata, plus the two MCP tools, on mocked HTTP.
+
+from dma.connectors.powerbi import CLASSIC_QUERY, INFO_QUERY, model_metadata, report_info  # noqa: E402
+
+DATASET_JSON = {"id": DATASET, "name": "AGI-DMA-TEST-SM", "configuredBy": "someone@example.com", "isRefreshable": True}
+SOURCES_JSON = {"value": [{"datasourceType": "Sql", "connectionDetails": {"server": "srv.example.com", "database": "jaffle"}}]}
+CLASSIC_ROWS = {"results": [{"tables": [{"rows": [{"[table]": "orders", "[column]": "order_id"}, {"[table]": "orders", "[column]": "RowNumber-2662979B"}, {"[table]": "customers", "[column]": "customer_id"}]}]}]}
+
+
+class RouteSend(FakeSend):
+    """Answers by URL suffix, so call order does not matter."""
+
+    def __init__(self, routes):
+        super().__init__(ok({}))
+        self.routes = routes
+
+    def __call__(self, method, url, headers, body, timeout):
+        self.calls.append({"method": method, "url": url, "body": json.loads(body) if body else None})
+        for suffix, resp in self.routes.items():
+            if url.endswith(suffix):
+                return resp
+        raise AssertionError(f"unexpected call {method} {url}")
+
+
+def test_report_info_with_datasources():
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), f"datasets/{DATASET}": ok(DATASET_JSON), "datasources": ok(SOURCES_JSON)})
+    info = report_info(client(send), REPORT)
+    assert info.report.name == "AGI-DMA-TEST-REPORT" and info.dataset.name == "AGI-DMA-TEST-SM"
+    assert [(s.server, s.database) for s in info.datasources] == [("srv.example.com", "jaffle")]
+    assert info.notes == []
+
+
+def test_report_info_datasources_forbidden_is_a_note():
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), f"datasets/{DATASET}": ok(DATASET_JSON), "datasources": Response(403, {}, b'{"error":{"code":"Forbidden"}}')})
+    info = report_info(client(send), REPORT, WS)
+    assert info.datasources is None and "datasources not available" in info.notes[0]
+
+
+def test_model_metadata_classic_route_without_workspace():
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeQueries": ok(CLASSIC_ROWS)})
+    md = model_metadata(client(send), REPORT)
+    assert send.calls[-1]["body"]["queries"][0]["query"] == CLASSIC_QUERY
+    assert md.tables == ["customers", "orders"] and [c.column for c in md.columns] == ["order_id", "customer_id"]
+    assert md.measures is None and "not available" in md.measures_status and "not available" in md.m_transforms_status
+    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "skipped"), ("classic_columnstatistics", "ok")]
+
+
+def test_model_metadata_falls_back_when_info_route_fails(monkeypatch):
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeDaxQueries": Response(200, {}, b"x"), "executeQueries": ok(CLASSIC_ROWS)})
+    md = model_metadata(client(send), REPORT, WS)
+    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "failed"), ("classic_columnstatistics", "ok")]
+    assert "pbi-arrow" in md.routes_tried[0].detail
+
+
+def test_model_metadata_no_route_raises_with_routes():
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeQueries": Response(403, {}, b"{}")})
+    with pytest.raises(PowerBIError, match="no route") as e:
+        model_metadata(client(send), REPORT)
+    assert "Dataset Execute Queries REST API" in str(e.value)
+
+
+def test_model_metadata_info_route():
+    pa = pytest.importorskip("pyarrow")
+
+    def stream(cols):
+        t = pa.table(cols)
+        sink = pa.BufferOutputStream()
+        with pa.ipc.new_stream(sink, t.schema) as w:
+            w.write_table(t)
+        return sink.getvalue().to_pybytes()
+
+    body = (stream({"[table]": ["orders"]})
+            + stream({"[table]": ["orders", "orders"], "[column]": ["order_id", "RowNumber-1"], "[data_type]": ["Int64", "Int64"], "[type]": ["Data", "RowNumber"], "[expression]": [None, None]})
+            + stream({"[table]": ["orders"], "[measure]": ["Total"], "[expression]": ["SUM(orders[amount])"]})
+            + stream({"[table]": ["orders"], "[partition]": ["orders-1"], "[query_definition]": ['let Source = Sql.Database("srv", "jaffle") in Source']}))
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeDaxQueries": Response(200, {"content-type": "application/vnd.apache.arrow.stream"}, body)})
+    md = model_metadata(client(send), REPORT, WS)
+    assert send.calls[-1]["body"]["query"] == INFO_QUERY
+    assert md.tables == ["orders"] and [c.column for c in md.columns] == ["order_id"]
+    assert md.measures[0].expression == "SUM(orders[amount])" and md.m_transforms_status == "available"
+    assert md.m_transforms[0].m_expression.startswith("let Source")
+
+
+@pytest.mark.anyio
+async def test_pbi_tools_over_mcp(tmp_path):
+    from mcp import Client
+
+    from conftest import CONFIG_DIR, SMX_DIR
+    from dma.config import load_settings
+    from dma.server import build_server
+    from dma.tools import DmaTools
+
+    settings = load_settings({"DMA_SMX_DIR": str(SMX_DIR), "DMA_OUTPUT_DIR": str(tmp_path / "out"), "DMA_CONFIG_DIR": str(CONFIG_DIR)})
+    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), f"datasets/{DATASET}": ok(DATASET_JSON), "datasources": ok(SOURCES_JSON)})
+    good = build_server(DmaTools(settings, pbi_factory=lambda: client(send)))
+    no_token = build_server(DmaTools(settings, pbi_factory=lambda: PowerBIClient.from_env({})))
+    async with Client(good) as c:
+        tools = {t.name: t for t in (await c.list_tools()).tools}
+        r = await c.call_tool("pbi_get_report", {"report_id": REPORT, "dataset_id": OTHER})
+    async with Client(no_token) as c:
+        missing = await c.call_tool("pbi_get_report", {"report_id": REPORT})
+    for name in ("pbi_get_report", "pbi_model_metadata"):
+        assert tools[name].annotations.read_only_hint and tools[name].annotations.open_world_hint
+    assert r.is_error and "dataset mismatch" in r.content[0].text
+    assert missing.is_error and "PBI_ACCESS_TOKEN" in missing.content[0].text

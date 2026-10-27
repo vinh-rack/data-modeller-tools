@@ -3,12 +3,13 @@
 import json
 from collections import Counter
 from functools import cached_property
-from typing import Annotated, Literal
+from typing import Annotated, Callable, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from dma.config import Settings, load_yaml
+from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
 from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.lineage.dbt_manifest import DbtManifest, DbtUpstream, ManifestError
@@ -54,8 +55,10 @@ def _cell(text: str | None) -> str:
 
 
 class DmaTools:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env):
         self.settings = settings
+        self._pbi_factory = pbi_factory
+        self._pbi_client: PowerBIClient | None = None
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
@@ -133,6 +136,36 @@ class DmaTools:
         try:
             return column_lineage(sql, column, dialect)
         except LineageError as e:
+            raise ToolError(str(e)) from e
+
+    def _pbi(self) -> PowerBIClient:
+        # Built on first use and kept for the life of the server, so its response cache spans the IDE session.
+        if self._pbi_client is None:
+            try:
+                self._pbi_client = self._pbi_factory()
+            except PowerBIError as e:
+                raise ToolError(str(e)) from e
+        return self._pbi_client
+
+    def pbi_get_report(
+        self,
+        report_id: Annotated[str, Field(description="Power BI report ID (GUID).")],
+        workspace_id: Annotated[str | None, Field(description="Workspace ID (GUID). Omit for My workspace.")] = None,
+        dataset_id: Annotated[str | None, Field(description="Optional dataset ID (GUID). It must match the report's own dataset, otherwise the call stops.")] = None,
+    ) -> PbiReportInfo:
+        try:
+            return report_info(self._pbi(), report_id, workspace_id, dataset_id)
+        except PowerBIError as e:
+            raise ToolError(str(e)) from e
+
+    def pbi_model_metadata(
+        self,
+        report_id: Annotated[str, Field(description="Power BI report ID (GUID). The dataset is taken from the report.")],
+        workspace_id: Annotated[str | None, Field(description="Workspace ID (GUID). Needed for the INFO function route that returns measures and M transforms. Omit for My workspace.")] = None,
+    ) -> PbiModelMetadata:
+        try:
+            return model_metadata(self._pbi(), report_id, workspace_id)
+        except PowerBIError as e:
             raise ToolError(str(e)) from e
 
     def start_session(
