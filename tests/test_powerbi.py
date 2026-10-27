@@ -217,7 +217,7 @@ def test_parse_arrow_rows_and_error_rowset():
 
 # report_info and model_metadata, plus the two MCP tools, on mocked HTTP.
 
-from dma.connectors.powerbi import CLASSIC_QUERY, INFO_QUERY, model_metadata, report_info  # noqa: E402
+from dma.connectors.powerbi import CLASSIC_QUERY, INFO_COLUMNS, INFO_MEASURES, INFO_PARTITIONS, INFO_QUERY, INFO_TABLES, model_metadata, report_info  # noqa: E402
 
 DATASET_JSON = {"id": DATASET, "name": "AGI-DMA-TEST-SM", "configuredBy": "someone@example.com", "isRefreshable": True}
 SOURCES_JSON = {"value": [{"datasourceType": "Sql", "connectionDetails": {"server": "srv.example.com", "database": "jaffle"}}]}
@@ -253,21 +253,65 @@ def test_report_info_datasources_forbidden_is_a_note():
     assert info.datasources is None and "datasources not available" in info.notes[0]
 
 
-def test_model_metadata_classic_route_without_workspace():
-    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeQueries": ok(CLASSIC_ROWS)})
+def rows(*items):
+    return ok({"results": [{"tables": [{"rows": list(items)}]}]})
+
+
+DAX_ERROR = ok({"results": [{"tables": [{"error": {"code": "DAXQueryFailure", "message": "INFO not supported"}}]}]})
+
+
+class QuerySend(RouteSend):
+    """Answers executeQueries calls by the DAX in the body, since every classic query shares one URL."""
+
+    def __init__(self, routes, queries):
+        super().__init__(routes)
+        self.queries = queries
+
+    def __call__(self, method, url, headers, body, timeout):
+        if url.endswith("executeQueries"):
+            query = json.loads(body)["queries"][0]["query"]
+            self.calls.append({"method": method, "url": url, "body": json.loads(body)})
+            return self.queries[query]
+        return super().__call__(method, url, headers, body, timeout)
+
+
+def test_model_metadata_classic_info_view_route_without_workspace():
+    send = QuerySend({f"reports/{REPORT}": ok(REPORT_JSON)}, {
+        INFO_COLUMNS: rows({"[table]": "orders", "[column]": "order_id", "[data_type]": "Int64", "[type]": "Data"}, {"[table]": "orders", "[column]": "RowNumber-1", "[type]": "RowNumber"}),
+        INFO_TABLES: rows({"[table]": "orders"}),
+        INFO_MEASURES: rows({"[table]": "orders", "[measure]": "Total", "[expression]": "SUM(orders[amount])"}),
+        INFO_PARTITIONS: DAX_ERROR,
+    })
     md = model_metadata(client(send), REPORT)
-    assert send.calls[-1]["body"]["queries"][0]["query"] == CLASSIC_QUERY
+    assert md.tables == ["orders"] and [(c.column, c.data_type) for c in md.columns] == [("order_id", "Int64")]
+    assert md.measures_status == "available" and md.measures[0].expression == "SUM(orders[amount])"
+    assert md.m_transforms is None and "INFO not supported" in md.m_transforms_status
+    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "skipped"), ("classic_info_view", "ok"), ("classic_info_view_tables", "ok"), ("classic_info_view_measures", "ok"), ("classic_info_partitions", "failed")]
+
+
+def test_model_metadata_columnstatistics_when_info_view_fails():
+    send = QuerySend({f"reports/{REPORT}": ok(REPORT_JSON)}, {INFO_COLUMNS: DAX_ERROR, CLASSIC_QUERY: ok(CLASSIC_ROWS)})
+    md = model_metadata(client(send), REPORT)
     assert md.tables == ["customers", "orders"] and [c.column for c in md.columns] == ["order_id", "customer_id"]
     assert md.measures is None and "not available" in md.measures_status and "not available" in md.m_transforms_status
-    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "skipped"), ("classic_columnstatistics", "ok")]
+    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "skipped"), ("classic_info_view", "failed"), ("classic_columnstatistics", "ok")]
 
 
 def test_model_metadata_falls_back_when_info_route_fails(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyarrow", None)
-    send = RouteSend({f"reports/{REPORT}": ok(REPORT_JSON), "executeDaxQueries": Response(200, {}, b"x"), "executeQueries": ok(CLASSIC_ROWS)})
+    send = QuerySend({f"reports/{REPORT}": ok(REPORT_JSON), "executeDaxQueries": Response(200, {}, b"x")}, {INFO_COLUMNS: DAX_ERROR, CLASSIC_QUERY: ok(CLASSIC_ROWS)})
     md = model_metadata(client(send), REPORT, WS)
-    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "failed"), ("classic_columnstatistics", "ok")]
+    assert [(r.route, r.outcome) for r in md.routes_tried] == [("info_functions", "failed"), ("classic_info_view", "failed"), ("classic_columnstatistics", "ok")]
     assert "pbi-arrow" in md.routes_tried[0].detail
+
+
+def test_group_path_401_mentions_my_workspace():
+    send = FakeSend(Response(401, {}, b""))
+    with pytest.raises(PowerBIAuthError, match="without workspace_id"):
+        client(send).get_report(REPORT, WS)
+    with pytest.raises(PowerBIAuthError) as e:
+        client(send).get_report(REPORT)
+    assert "workspace_id" not in str(e.value)
 
 
 def test_model_metadata_no_route_raises_with_routes():

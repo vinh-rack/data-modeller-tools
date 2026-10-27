@@ -161,7 +161,7 @@ class DmaTools:
     def pbi_model_metadata(
         self,
         report_id: Annotated[str, Field(description="Power BI report ID (GUID). The dataset is taken from the report.")],
-        workspace_id: Annotated[str | None, Field(description="Workspace ID (GUID). Needed for the INFO function route that returns measures and M transforms. Omit for My workspace.")] = None,
+        workspace_id: Annotated[str | None, Field(description="Workspace ID (GUID) for a shared workspace, which enables the Arrow INFO route. Omit for My workspace: its group paths return 401.")] = None,
     ) -> PbiModelMetadata:
         try:
             return model_metadata(self._pbi(), report_id, workspace_id)

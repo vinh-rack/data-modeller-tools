@@ -126,7 +126,9 @@ Get-PowerBIAccessToken -AsString
 
 Paste the whole output into `PBI_ACCESS_TOKEN` in `.env`, then reconnect the `dma` server. The token is never logged and is redacted from errors. When it expires, the tools return a 401 message telling you to refresh it. Sign-in through MSAL is a TODO.
 
-`pbi_model_metadata` tries INFO functions through Execute DAX Queries In Group first, which needs a workspace ID and the `pbi-arrow` extra (pyarrow) to read its Arrow response. Otherwise it falls back to column names through the classic endpoint and marks measures and M transforms as not available.
+`pbi_model_metadata` tries INFO functions through Execute DAX Queries In Group first, which needs a workspace ID and the `pbi-arrow` extra (pyarrow) to read its Arrow response. Otherwise it runs the INFO.VIEW queries one at a time on the classic endpoint. The docs say INFO functions are not supported there, but the Phase 0 probe showed INFO.VIEW working. If that fails too, it falls back to column names from COLUMNSTATISTICS. Any part it cannot get is marked not available, with the reason in `routes_tried`.
+
+For content in My workspace, leave the workspace ID out. In Phase 0 every `groups/{My workspace ID}/` call returned 401 while the same token passed on the My workspace paths, so the Arrow route is not available there.
 
 Run the Phase 0 probe against your sandbox IDs (set `PBI_REPORT_ID`, `PBI_DATASET_ID` and optionally `PBI_WORKSPACE_ID` in `.env`):
 
