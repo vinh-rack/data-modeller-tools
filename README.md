@@ -128,7 +128,7 @@ Paste the whole output into `PBI_ACCESS_TOKEN` in `.env`, then reconnect the `dm
 
 `pbi_model_metadata` tries INFO functions through Execute DAX Queries In Group first, which needs a workspace ID and the `pbi-arrow` extra (pyarrow) to read its Arrow response. Otherwise it runs the INFO.VIEW queries one at a time on the classic endpoint. The docs say INFO functions are not supported there, but the Phase 0 probe showed INFO.VIEW working. If that fails too, it falls back to column names from COLUMNSTATISTICS. Any part it cannot get is marked not available, with the reason in `routes_tried`.
 
-For content in My workspace, leave the workspace ID out. In Phase 0 every `groups/{My workspace ID}/` call returned 401 while the same token passed on the My workspace paths, so the Arrow route is not available there.
+For content in My workspace, leave the workspace ID out. In Phase 0 the GET and Execute DAX Queries calls on `groups/{My workspace ID}/` returned 401 while the same token passed on the My workspace paths, so the Arrow route is not available there. Only the classic executeQueries call worked on that group path.
 
 Run the Phase 0 probe against your sandbox IDs (set `PBI_REPORT_ID`, `PBI_DATASET_ID` and optionally `PBI_WORKSPACE_ID` in `.env`):
 
@@ -136,7 +136,7 @@ Run the Phase 0 probe against your sandbox IDs (set `PBI_REPORT_ID`, `PBI_DATASE
 uv run --extra pbi-arrow python scripts/pbi_probe.py
 ```
 
-It runs the six calls from the ARCHITECTURE call plan, prints PASS, FAIL or SKIP for each, and answers Q8 (tenant setting), Q9 (INFO route), Q10 (datasources permission) and whether group paths work for My workspace. It makes no writes to Power BI. pytest never makes live calls.
+It runs the calls from the ARCHITECTURE call plan plus checks of INFO.VIEW and INFO.PARTITIONS on the classic endpoint, prints PASS, FAIL or SKIP for each, and answers Q8 (tenant setting), Q9 (INFO route), Q10 (datasources permission) and whether group paths work for My workspace. It makes no writes to Power BI. pytest never makes live calls.
 
 ## **4. Adding a rule**
 
