@@ -7,6 +7,7 @@ from dma.rules import REGISTRY, RuleContext, run_rules
 from dma.rules.base import rule_config
 from dma.rules.fact_keys_only import check_fact_keys_only
 from dma.rules.gold_columns_used import check_gold_columns_used
+from dma.rules.key_suffix import check_key_suffix
 from dma.rules.layer_bypass import check_layer_bypass
 from dma.rules.layer_hierarchy import check_layer_hierarchy
 from dma.rules.naming import check_naming
@@ -70,6 +71,20 @@ class TestLayer002:
         t = tbl("gold_fleet.f_x", Layer.GOLD, ["a"], ["slvr_stg.x"])
         idx = ModelIndex({}, [t], SchemaClassifier(rules_cfg))
         assert "LAYER-002" not in ids(run_rules(RuleContext(index=idx, targets=[t], config=rules_cfg)))
+
+
+class TestKey001:
+    def test_pass_suffixes_by_layer(self, rules_cfg):
+        stg = tbl("slvr_stg.booking", Layer.SILVER_STAGING, [pk("booking_num")])
+        idm = tbl("slvr_cdm.booking", Layer.SILVER_IDM, [Column(name="booking_id", is_pk=True, rules="hash(booking_num)"), Column(name="booking_num", rules="1:1 mapping")])
+        agg = tbl("gold_fleet.agg_x", Layer.GOLD, [pk("driver_id"), pk("booking_month")])
+        assert run(check_key_suffix, rules_cfg, [stg, idm, agg]) == []
+
+    def test_fail_wrong_suffixes(self, rules_cfg):
+        stg = tbl("slvr_stg.booking", Layer.SILVER_STAGING, [pk("booking_id")])
+        gold = tbl("gold_fleet.d_x", Layer.GOLD, [pk("x_num"), Column(name="owner_num", rules="MD5(owner_code)")])
+        f = run(check_key_suffix, rules_cfg, [stg, gold])
+        assert [(x.column, x.evidence["expected_suffix"]) for x in f] == [("booking_id", "_num"), ("x_num", "_id"), ("owner_num", "_id")]
 
 
 class TestFact001:
@@ -170,7 +185,7 @@ def test_every_rule_fires_on_fixture(index, rules_cfg):
     findings = run_rules(RuleContext(index=index, targets=targets, config=rules_cfg, column_usage=usage))
     fired = {f.rule_id for f in findings if f.severity != "info"}
     enabled = {r for r in REGISTRY if rule_config(rules_cfg, r).get("enabled", True)}
-    assert fired == enabled == {"LAYER-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
+    assert fired == enabled == {"LAYER-001", "KEY-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
     assert set(REGISTRY) - enabled == {"LAYER-002"}
     for f in findings:
         assert f.rule_id and f.severity and f.table and f.message and isinstance(f.evidence, dict)

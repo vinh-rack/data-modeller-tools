@@ -27,7 +27,7 @@ TOOLS = [
     ("get_model", "Return every table of one SMX model: layer, schema, BU, grain (PK columns), columns and source tables.", READ_ONLY),
     ("find_tables_by_bronze", "Find modelled tables in any SMX that source from a bronze table, directly or through upstream layers. Use for reuse checks.", READ_ONLY),
     ("find_tables_by_grain", "Find tables in any SMX whose grain (PK column set) equals the given columns. Use to check one table per grain.", READ_ONLY),
-    ("run_rules", "Run the deterministic rules (LAYER-001, LAYER-002 when enabled, FACT-001, NAME-001, GOLD-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
+    ("run_rules", "Run the deterministic rules (LAYER-001, LAYER-002 when enabled, FACT-001, NAME-001, GOLD-001, KEY-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
     ("dbt_upstream", "List the bronze source tables a dbt model depends on, from the dbt manifest depends_on graph.", READ_ONLY),
     ("sql_column_lineage", "Trace one output column of a SQL statement to its source table columns (redshift, databricks or spark dialect).", READ_ONLY),
     ("pbi_get_report", "Read a Power BI report, its semantic model and its data sources by ID (read-only). Rejects paginated reports and a dataset ID that does not match the report.", READS_POWER_BI),

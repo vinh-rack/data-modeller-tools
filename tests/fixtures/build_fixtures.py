@@ -73,6 +73,8 @@ def build_eip_family():
         ("slvr_cdm", "fleet", "driver", "driver_nm", "string", 1, "slvr_stg", "driver", "driver_nm", None, "Y", "1:1 mapping"),
         ("slvr_cdm", "fleet", "vehicle", "vehicle_id", "string", 1, "slvr_stg", "vehicle", "vehicle_num", "Y", "-", "hash(vehicle_num)"),
         ("slvr_cdm", "fleet", "vehicle", "vehicle_nm", "string", 1, "slvr_stg", "vehicle", "vehicle_nm", None, "-", "1:1 mapping"),
+        # KEY-001 violation: a hash key named with the natural key suffix
+        ("slvr_cdm", "fleet", "vehicle", "owner_num", "string", 1, "slvr_stg", "vehicle", "vehicle_num", None, "-", "hash(vehicle_num)"),
     ])
 
     gold_header = ["schema name", "table name", "column name", "set no.", "pk", "source system", "source table", "source column", "data type", "rules"]

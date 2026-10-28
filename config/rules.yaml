@@ -52,6 +52,16 @@ rules:
   GOLD-001:
     enabled: true
     severity: warning
+  KEY-001:
+    enabled: true
+    severity: warning
+    # Inferred key type, since the SMX has no key-type column: PKs here are natural keys...
+    natural_key_layers: [silver_staging]
+    natural_key_suffix: "_num"
+    # ...PKs here are hash keys, and so is any column whose rule text matches hash_rule_pattern.
+    hash_key_layers: [silver_idm, gold]
+    hash_key_suffix: "_id"
+    hash_rule_pattern: "\\b(hash|md5|sha\\d*)\\s*\\("
   GRAIN-001:
     enabled: true
     severity_same_bu: error
