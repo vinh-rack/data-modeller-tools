@@ -1,4 +1,4 @@
-"""Spawn dma-server over stdio and list its tools with their read-only hint and description. Calls no tools.
+"""Spawn dma-server over stdio and list its tools as bullets: name - description. Calls no tools.
 
 Run: uv run python scripts/list_tools.py
 """
@@ -17,11 +17,9 @@ async def main() -> int:
         return 1
     async with Client(StdioServerParameters(command=uv, args=["run", "--quiet", "dma-server"])) as client:
         tools = (await client.list_tools()).tools
-    width = max(len(t.name) for t in tools)
     print(f"{len(tools)} tools\n")
     for t in tools:
-        mode = "read" if t.annotations and t.annotations.read_only_hint else "write"
-        print(f"{t.name:<{width}}  {mode:<5}  {t.description}")
+        print(f"- {t.name} - {t.description}")
     return 0
 
 
