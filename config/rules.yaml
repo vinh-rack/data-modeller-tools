@@ -29,6 +29,13 @@ rules:
   LAYER-001:
     enabled: true
     severity: error
+  LAYER-002:
+    # Off until REQUIREMENTS Q2 confirms no-bypass is a hard rule.
+    enabled: false
+    severity: error
+    allowed_sources:
+      gold: [silver_idm, gold]
+      silver_idm: [silver_staging, silver_idm]
   FACT-001:
     enabled: true
     severity: error

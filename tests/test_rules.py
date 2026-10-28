@@ -7,6 +7,7 @@ from dma.rules import REGISTRY, RuleContext, run_rules
 from dma.rules.base import rule_config
 from dma.rules.fact_keys_only import check_fact_keys_only
 from dma.rules.gold_columns_used import check_gold_columns_used
+from dma.rules.layer_bypass import check_layer_bypass
 from dma.rules.layer_hierarchy import check_layer_hierarchy
 from dma.rules.naming import check_naming
 from dma.rules.one_table_per_grain import check_aggregate_should_be_view, check_one_table_per_grain
@@ -47,6 +48,28 @@ class TestLayer001:
     def test_unresolved_source_is_info(self, rules_cfg):
         t = tbl("slvr_cdm.x", Layer.SILVER_IDM, ["a"], ["mystery.x"])
         assert ids(run(check_layer_hierarchy, rules_cfg, [t]), "info") == ["LAYER-001"]
+
+
+class TestLayer002:
+    def test_pass_allowed_sources(self, rules_cfg):
+        gold = tbl("gold_fleet.f_x", Layer.GOLD, ["a"], ["slvr_cdm.x", "gold_fleet.d_y"])
+        idm = tbl("slvr_cdm.x", Layer.SILVER_IDM, ["a"], ["slvr_stg.x"])
+        assert run(check_layer_bypass, rules_cfg, [gold, idm]) == []
+
+    def test_fail_gold_from_staging_and_idm_from_bronze(self, rules_cfg):
+        gold = tbl("gold_fleet.f_x", Layer.GOLD, ["a"], ["slvr_stg.x"])
+        idm = tbl("slvr_cdm.x", Layer.SILVER_IDM, ["a"], ["brnz_src.x"])
+        f = run(check_layer_bypass, rules_cfg, [gold, idm])
+        assert [(x.table, x.evidence["source_layer"]) for x in f] == [("gold_fleet.f_x", "silver_staging"), ("slvr_cdm.x", "bronze")]
+
+    def test_downstream_and_unresolved_left_to_layer001(self, rules_cfg):
+        t = tbl("slvr_cdm.x", Layer.SILVER_IDM, ["a"], ["gold_fleet.f_x", "mystery.x"])
+        assert run(check_layer_bypass, rules_cfg, [t]) == []
+
+    def test_off_by_default(self, rules_cfg):
+        t = tbl("gold_fleet.f_x", Layer.GOLD, ["a"], ["slvr_stg.x"])
+        idx = ModelIndex({}, [t], SchemaClassifier(rules_cfg))
+        assert "LAYER-002" not in ids(run_rules(RuleContext(index=idx, targets=[t], config=rules_cfg)))
 
 
 class TestFact001:
@@ -146,7 +169,9 @@ def test_every_rule_fires_on_fixture(index, rules_cfg):
     usage = {f"{t.qualified}.{c.name}" for t in targets for c in t.columns if c.name != "booking_date"}
     findings = run_rules(RuleContext(index=index, targets=targets, config=rules_cfg, column_usage=usage))
     fired = {f.rule_id for f in findings if f.severity != "info"}
-    assert fired == set(REGISTRY) == {"LAYER-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
+    enabled = {r for r in REGISTRY if rule_config(rules_cfg, r).get("enabled", True)}
+    assert fired == enabled == {"LAYER-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
+    assert set(REGISTRY) - enabled == {"LAYER-002"}
     for f in findings:
         assert f.rule_id and f.severity and f.table and f.message and isinstance(f.evidence, dict)
 
