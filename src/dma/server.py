@@ -12,7 +12,7 @@ from dma.tools import DmaTools
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 READS_POWER_BI = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True)
-WRITES_OUTPUT =ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
+WRITES_OUTPUT = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=False)
 
 INSTRUCTIONS = (
     "Read-only assistant for lakehouse SMX data models (Bronze, Silver Staging, Silver IDM, Gold). "
