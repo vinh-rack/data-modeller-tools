@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from dma.connectors.powerbi import CLASSIC_QUERY, INFO_COLUMNS, INFO_MEASURES, INFO_PARTITIONS, INFO_QUERY, PowerBIClient, PowerBIError, cell, check_id, parse_arrow
 
 ROOT = Path(__file__).resolve().parents[1]
+PARTITIONS_ALONE_QUERY = 'EVALUATE SELECTCOLUMNS(INFO.PARTITIONS(), "partition", [Name], "query_definition", [QueryDefinition])'
 
 
 class Probe:
@@ -108,6 +109,8 @@ def main() -> int:
     p.step("5b", "POST executeQueries INFO.VIEW.COLUMNS()", classic_info(INFO_COLUMNS, "data_type", "columns"))
     p.step("5c", "POST executeQueries INFO.VIEW.MEASURES()", classic_info(INFO_MEASURES, "expression", "measures"))
     p.step("5d", "POST executeQueries INFO.PARTITIONS()", classic_info(INFO_PARTITIONS, "query_definition", "partitions"))
+    # 5d joins INFO.TABLES for the table names. This runs INFO.PARTITIONS alone, to tell a refused function from a refused join.
+    p.step("5e", "POST executeQueries INFO.PARTITIONS() alone", classic_info(PARTITIONS_ALONE_QUERY, "query_definition", "partitions"))
 
     def info() -> str:
         resp = client.request("POST", f"groups/{workspace_id}/datasets/{dataset_id}/executeDaxQueries", {"query": INFO_QUERY, "resultSetRowCountLimit": client.max_rows})
@@ -132,7 +135,7 @@ def main() -> int:
     print()
     print(f"Q8  tenant setting 'Dataset Execute Queries REST API' on: {'yes' if p.ok.get('4') else 'no or no build permission, see call 4'}")
     q9 = p.ok.get("6")
-    print(f"Q9  INFO route returns metadata: Arrow {'yes, see call 6 for M coverage' if q9 else 'not tested' if q9 is None else 'no, see call 6'}; classic measures {'yes' if p.ok.get('5c') else 'no'}, classic M {'yes' if p.ok.get('5d') else 'no'} (see 5c and 5d for counts)")
+    print(f"Q9  INFO route returns metadata: Arrow {'yes, see call 6 for M coverage' if q9 else 'not tested' if q9 is None else 'no, see call 6'}; classic measures {'yes' if p.ok.get('5c') else 'no'}, classic M {'yes' if p.ok.get('5d') else 'only without the INFO.TABLES join, see 5e' if p.ok.get('5e') else 'no'} (see 5c to 5e for counts)")
     in_group = "" if p.ok.get("3b") is None else f", group path {'yes' if p.ok['3b'] else 'no, see call 3b'}"
     print(f"Q10 datasources call works: {'yes' if p.ok.get('3') else 'no, see call 3'}{in_group} (in My workspace you own the dataset, so a pass does not prove read access alone is enough)")
     g = p.ok.get("1b")
