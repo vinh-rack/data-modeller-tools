@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from dma.index.model_index import ModelIndex
+from dma.kb import ReportEntry
 from dma.lineage.sql_lineage import LineageError
 from dma.models import Layer, SourceRef, Table
 
@@ -101,12 +102,12 @@ def table_lineage(index: ModelIndex, table: str, direction: Direction = "upstrea
     return graph(b.nodes, b.edges, roots, direction)
 
 
-def graph(nodes: dict[str, LineageNode], edges: set[tuple[str, str]], roots: list[str], direction: Direction) -> LineageGraph:
+def graph(nodes: dict[str, LineageNode], edges: set[tuple[str, str]], roots: list[str], direction: Direction, other_title: str = "Other") -> LineageGraph:
     order = {layer: i for i, layer in enumerate(_LAYER_TITLES)}
     ordered = sorted(nodes.values(), key=lambda n: (order.get(n.layer, len(order)), n.table))
     ids = {n.table: f"n{i}" for i, n in enumerate(ordered)}
     lines = ["flowchart LR"]
-    for layer, title in [*_LAYER_TITLES.items(), (None, "Other")]:
+    for layer, title in [*_LAYER_TITLES.items(), (None, other_title)]:
         members = [n for n in ordered if n.layer == layer]
         if members:
             lines.append(f"  subgraph {layer.value if layer else 'other'} [{title}]")
@@ -120,8 +121,53 @@ def graph(nodes: dict[str, LineageNode], edges: set[tuple[str, str]], roots: lis
         marked = [ids[n.table] for n in ordered if n.status == status]
         if marked:
             lines.append(f"  class {','.join(marked)} {status}")
-    lines.append(f"  class {','.join(ids[r] for r in roots if r in ids)} root")
+    if roots:
+        lines.append(f"  class {','.join(ids[r] for r in roots if r in ids)} root")
     return LineageGraph(root=roots, direction=direction, nodes=ordered, edges=[LineageEdge(source=s, target=t) for s, t in sorted(edges)], mermaid="\n".join(lines) + "\n")
+
+
+class ReportTableLineage(BaseModel):
+    pbi_table: str
+    gold_table: str | None
+    bronze: list[str]
+    status: Literal["confirmed", "unknown"]
+    note: str | None = None
+
+
+class ReportLineage(BaseModel):
+    report_id: str
+    report_name: str | None
+    tables: list[ReportTableLineage]
+    mermaid: str
+
+
+def report_lineage(index: ModelIndex, entry: ReportEntry, pbi_tables: list[str]) -> ReportLineage:
+    """Power BI table -> Gold -> Bronze (FR-L4). A table without a mapped, indexed Gold table is marked unknown, never guessed."""
+    b = _Builder(index)
+    rows = []
+    for pbi in sorted(set(pbi_tables) | set(entry.tables)):
+        node = f"report.{pbi}"
+        mapped = entry.tables.get(pbi)
+        gold = [t for t in index.resolve(mapped.table) if t.layer is Layer.GOLD] if mapped else []
+        if pbi not in pbi_tables:
+            note = "in the report map but not in the Power BI model"
+        elif not mapped:
+            note = "not in the report map"
+        elif not gold:
+            note = f"mapped to {mapped.table}, which is not a Gold table in any SMX"
+        else:
+            note = None
+        b.nodes[node] = LineageNode(table=node, layer=None, status="unknown" if note else "confirmed")
+        if note:
+            rows.append(ReportTableLineage(pbi_table=pbi, gold_table=mapped.table if mapped else None, bronze=[], status="unknown", note=note))
+            continue
+        b.walk(gold, upstream=True)
+        for g in gold:
+            b.edges.add((g.qualified, node))
+        bronze = sorted({src for t in gold for src in index.bronze_sources(t)})
+        rows.append(ReportTableLineage(pbi_table=pbi, gold_table=gold[0].qualified, bronze=bronze, status="confirmed" if bronze else "unknown", note=None if bronze else "no Bronze source found upstream"))
+    g = graph(b.nodes, b.edges, [], "upstream", other_title=f"Power BI: {entry.name or entry.report_id}")
+    return ReportLineage(report_id=entry.report_id, report_name=entry.name, tables=rows, mermaid=g.mermaid)
 
 
 def _label(text: str) -> str:

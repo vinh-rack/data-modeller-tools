@@ -32,6 +32,7 @@ TOOLS = [
     ("read_kb", "Read one knowledge base file by the exact name list_kb returned. Use it to explain findings, never to re-derive run_rules checks.", READ_ONLY),
     ("get_report_map", "Return the report-to-model map entry for a Power BI report: its SMX model and the Gold table behind each Power BI table.", READ_ONLY),
     ("lineage_diagram", "Build table-level lineage from the SMX index: nodes tagged confirmed or inferred, edges, and a Mermaid flowchart to show the modeller and later save with write_artifact (lineage_mermaid).", READ_ONLY),
+    ("report_lineage", "Trace each Power BI table of a report to its Gold table and Bronze sources, using Power BI metadata, the report map and the SMX index. Unmapped tables are marked unknown. Returns a Mermaid flowchart too.", READS_POWER_BI),
     ("dbt_upstream", "List the bronze source tables a dbt model depends on, from the dbt manifest depends_on graph.", READ_ONLY),
     ("sql_column_lineage", "Trace one output column of a SQL statement to its source table columns (redshift, databricks or spark dialect).", READ_ONLY),
     ("pbi_get_report", "Read a Power BI report, its semantic model and its data sources by ID (read-only). Rejects paginated reports and a dataset ID that does not match the report.", READS_POWER_BI),

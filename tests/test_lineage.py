@@ -46,7 +46,8 @@ def test_sql_lineage_unknown_column():
 # Table-level lineage diagrams from the SMX index.
 
 from dma.index.model_index import ModelIndex  # noqa: E402
-from dma.lineage.diagram import table_lineage  # noqa: E402
+from dma.kb import ReportEntry, TableMap  # noqa: E402
+from dma.lineage.diagram import report_lineage, table_lineage  # noqa: E402
 from dma.models import SourceRef  # noqa: E402
 
 
@@ -85,3 +86,22 @@ def test_unindexed_source_is_inferred_and_unknown_table_refused(index):
     assert "class n" in g.mermaid and "inferred" in g.mermaid
     with pytest.raises(LineageError):
         table_lineage(index, "nope.nope")
+
+
+def test_report_lineage_traces_or_marks_unknown(index):
+    entry = ReportEntry(report_id="r1", name="Fleet", tables={
+        "Booking": TableMap(table="gold_fleet.f_booking"),
+        "Driver": TableMap(table="gold_fleet.d_driver"),
+        "Staging": TableMap(table="slvr_stg.booking"),
+        "Gone": TableMap(table="gold_fleet.d_gone"),
+    })
+    r = report_lineage(index, entry, ["Booking", "Driver", "Calendar", "Staging"])
+    rows = {x.pbi_table: x for x in r.tables}
+    assert rows["Booking"].status == "confirmed" and rows["Booking"].bronze == ["brnz_fleetops.booking", "brnz_fleetops.driver", "brnz_fleetops.meter_change"]
+    assert rows["Driver"].bronze == ["brnz_fleetops.driver"]
+    assert {k: rows[k].note for k in ("Calendar", "Staging", "Gone")} == {
+        "Calendar": "not in the report map",
+        "Staging": "mapped to slvr_stg.booking, which is not a Gold table in any SMX",
+        "Gone": "in the report map but not in the Power BI model",
+    }
+    assert "subgraph other [Power BI: Fleet]" in r.mermaid and "report.Booking" in r.mermaid

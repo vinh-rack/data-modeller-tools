@@ -9,7 +9,7 @@ from dma.server import build_server
 from dma.tools import DmaTools
 
 WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
 @pytest.fixture
@@ -84,6 +84,20 @@ async def test_run_rules_usage_from_report(server, monkeypatch):
     assert [f["column"] for f in data["findings"] if f["rule_id"] == "GOLD-001"] == ["booking_date"]
     assert "Calendar" in data["notes"][1]
     assert both.is_error and unmapped.is_error and "not in" in unmapped.content[0].text
+
+
+@pytest.mark.anyio
+async def test_report_lineage_tool(server, monkeypatch):
+    from dma import tools as tools_mod
+    from dma.connectors.powerbi import PbiModelMetadata
+
+    md = PbiModelMetadata(report_id="r", dataset_id="d", workspace_id=None, tables=["Booking", "Calendar"], columns=[], measures=None, measures_status="x", m_transforms=None, m_transforms_status="x", truncated=False, routes_tried=[])
+    monkeypatch.setattr(tools_mod, "model_metadata", lambda client, report_id, workspace_id: md)
+    async with Client(server) as c:
+        r = await c.call_tool("report_lineage", {"report_id": "22222222-2222-2222-2222-222222222222"})
+    rows = {x["pbi_table"]: x for x in r.structured_content["tables"]}
+    assert rows["Booking"]["status"] == "confirmed" and rows["Calendar"]["status"] == "unknown"
+    assert rows["Driver"]["note"] == "in the report map but not in the Power BI model"
 
 
 @pytest.mark.anyio
