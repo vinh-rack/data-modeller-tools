@@ -73,6 +73,11 @@ class ModelIndex:
                         queue.append(nxt)
         return [t for t in seen.values() if t.layer is not Layer.BRONZE]
 
+    def downstream(self, table: Table) -> list[Table]:
+        """Tables that list this table as a direct source, by qualified or bare name."""
+        found = {id(t): t for k in (table.qualified.lower(), table.name.lower()) for t in self._downstream.get(k, []) if t is not table}
+        return list(found.values())
+
     def by_grain(self, columns: list[str]) -> list[Table]:
         want = sorted({c.strip().lower() for c in columns if c.strip()})
         return [t for t in self.tables if want and t.grain == want]

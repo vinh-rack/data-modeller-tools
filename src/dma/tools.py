@@ -13,6 +13,7 @@ from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClien
 from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
+from dma.lineage.diagram import Direction, LineageGraph, table_lineage
 from dma.lineage.dbt_manifest import DbtManifest, DbtUpstream, ManifestError
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
@@ -162,6 +163,16 @@ class DmaTools:
         try:
             return self.kb.report(report_id)
         except KbError as e:
+            raise ToolError(str(e)) from e
+
+    def lineage_diagram(
+        self,
+        table: Annotated[str, Field(description="Table as schema.table or bare name from get_model.")],
+        direction: Annotated[Direction, Field(description="upstream (to bronze), downstream (to Gold) or both.")] = "upstream",
+    ) -> LineageGraph:
+        try:
+            return table_lineage(self.index, table, direction)
+        except LineageError as e:
             raise ToolError(str(e)) from e
 
     def dbt_upstream(self, model_name: Annotated[str, Field(description="dbt model name, alias or unique_id.")]) -> DbtUpstream:

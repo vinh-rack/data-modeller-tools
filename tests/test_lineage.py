@@ -41,3 +41,47 @@ def test_sql_lineage_rejects_unknown_dialect():
 def test_sql_lineage_unknown_column():
     with pytest.raises(LineageError, match="could not trace"):
         column_lineage(SQL, "nope", "redshift")
+
+
+# Table-level lineage diagrams from the SMX index.
+
+from dma.index.model_index import ModelIndex  # noqa: E402
+from dma.lineage.diagram import table_lineage  # noqa: E402
+from dma.models import SourceRef  # noqa: E402
+
+
+def edges(g):
+    return {(e.source, e.target) for e in g.edges}
+
+
+def test_upstream_reaches_bronze(index):
+    g = table_lineage(index, "gold_fleet.f_booking")
+    assert ("brnz_fleetops.meter_change", "slvr_stg.meter_change") in edges(g) and ("slvr_cdm.driver", "gold_fleet.f_booking") in edges(g)
+    assert all(n.status == "confirmed" for n in g.nodes) and g.root == ["gold_fleet.f_booking"]
+    assert g.mermaid.startswith("flowchart LR\n") and "subgraph bronze [Bronze]" in g.mermaid
+
+
+def test_bare_source_names_follow_the_source_layer(index):
+    # vehicle_master exists in Bronze, Silver Staging and Silver IDM; each must link only to its own upstream.
+    assert edges(table_lineage(index, "gold_logistics.d_vehicle")) == {
+        ("brnz_depot.vehicle_master", "slvr_stg.vehicle_master"),
+        ("slvr_stg.vehicle_master", "slvr_cdm.vehicle_master"),
+        ("slvr_cdm.vehicle_master", "gold_logistics.d_vehicle"),
+    }
+
+
+def test_downstream_and_both(index):
+    down = edges(table_lineage(index, "brnz_fleetops.booking", "downstream"))
+    assert ("gold_fleet.f_booking", "gold_fleet.agg_booking_by_driver") in down and not any(t.startswith("brnz_") for _, t in down)
+    both = table_lineage(index, "slvr_cdm.driver", "both")
+    assert ("brnz_fleetops.driver", "slvr_stg.driver") in edges(both) and ("slvr_cdm.driver", "gold_fleet.d_driver") in edges(both)
+
+
+def test_unindexed_source_is_inferred_and_unknown_table_refused(index):
+    t = index.resolve("slvr_stg.booking")[0]
+    orphan = t.model_copy(update={"sources": [SourceRef(schema_name="slvr_cdm", table="not_modelled")], "name": "orphan"})
+    g = table_lineage(ModelIndex(index.models, [*index.tables, orphan], index.classifier), "slvr_stg.orphan")
+    assert [(n.table, n.status) for n in g.nodes if n.status != "confirmed"] == [("slvr_cdm.not_modelled", "inferred")]
+    assert "class n" in g.mermaid and "inferred" in g.mermaid
+    with pytest.raises(LineageError):
+        table_lineage(index, "nope.nope")
