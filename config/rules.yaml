@@ -41,6 +41,11 @@ rules:
     severity: error
     fact_prefixes: ["f_"]
     descriptive_suffixes: ["_nm", "_name", "_desc", "_description", "_txt"]
+  META-001:
+    enabled: true
+    severity: warning
+    layers: [silver_staging, silver_idm]
+    required_columns: ["c_created_ts", "c_updated_ts", "c_source_system"]
   NAME-001:
     enabled: true
     severity: warning

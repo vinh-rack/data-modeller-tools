@@ -10,6 +10,7 @@ from dma.rules.gold_columns_used import check_gold_columns_used
 from dma.rules.key_suffix import check_key_suffix
 from dma.rules.layer_bypass import check_layer_bypass
 from dma.rules.layer_hierarchy import check_layer_hierarchy
+from dma.rules.metadata_columns import check_metadata_columns
 from dma.rules.naming import check_naming
 from dma.rules.one_table_per_grain import check_aggregate_should_be_view, check_one_table_per_grain
 
@@ -85,6 +86,20 @@ class TestKey001:
         gold = tbl("gold_fleet.d_x", Layer.GOLD, [pk("x_num"), Column(name="owner_num", rules="MD5(owner_code)")])
         f = run(check_key_suffix, rules_cfg, [stg, gold])
         assert [(x.column, x.evidence["expected_suffix"]) for x in f] == [("booking_id", "_num"), ("x_num", "_id"), ("owner_num", "_id")]
+
+
+class TestMeta001:
+    META = ["c_created_ts", "c_updated_ts", "c_source_system"]
+
+    def test_pass_silver_with_metadata_and_gold_without(self, rules_cfg):
+        stg = tbl("slvr_stg.x", Layer.SILVER_STAGING, [pk("x_num"), *self.META])
+        gold = tbl("gold_fleet.d_x", Layer.GOLD, [pk("x_id")])
+        assert run(check_metadata_columns, rules_cfg, [stg, gold]) == []
+
+    def test_fail_missing_columns(self, rules_cfg):
+        idm = tbl("slvr_cdm.x", Layer.SILVER_IDM, [pk("x_id"), "C_Created_TS"])
+        f = run(check_metadata_columns, rules_cfg, [idm])
+        assert [x.evidence["missing"] for x in f] == [["c_updated_ts", "c_source_system"]]
 
 
 class TestFact001:
@@ -185,7 +200,7 @@ def test_every_rule_fires_on_fixture(index, rules_cfg):
     findings = run_rules(RuleContext(index=index, targets=targets, config=rules_cfg, column_usage=usage))
     fired = {f.rule_id for f in findings if f.severity != "info"}
     enabled = {r for r in REGISTRY if rule_config(rules_cfg, r).get("enabled", True)}
-    assert fired == enabled == {"LAYER-001", "KEY-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
+    assert fired == enabled == {"LAYER-001", "KEY-001", "META-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
     assert set(REGISTRY) - enabled == {"LAYER-002"}
     for f in findings:
         assert f.rule_id and f.severity and f.table and f.message and isinstance(f.evidence, dict)
