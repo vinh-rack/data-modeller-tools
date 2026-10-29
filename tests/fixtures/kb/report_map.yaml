@@ -1,0 +1,13 @@
+# Synthetic report map for tests. The GUID is invented.
+reports:
+  "22222222-2222-2222-2222-222222222222":
+    name: Synthetic fleet bookings
+    model: synthetic_fleet_eip
+    tables:
+      Booking: gold_fleet.f_booking
+      Driver:
+        table: gold_fleet.d_driver
+        columns: {Driver Name: driver_nm}
+  "55555555-5555-5555-5555-555555555555":
+    tables:
+      Broken: {columns: {a: b}}

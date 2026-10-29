@@ -9,7 +9,7 @@ from dma.server import build_server
 from dma.tools import DmaTools
 
 WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
 @pytest.fixture
@@ -18,6 +18,7 @@ def server(tmp_path):
         "DMA_SMX_DIR": str(SMX_DIR),
         "DMA_OUTPUT_DIR": str(tmp_path / "output"),
         "DMA_CONFIG_DIR": str(CONFIG_DIR),
+        "DMA_KB_DIR": str(FIXTURES / "kb"),
         "DMA_DBT_MANIFEST": str(FIXTURES / "dbt" / "manifest.json"),
     })
     return build_server(DmaTools(settings))
@@ -51,6 +52,18 @@ async def test_run_rules_subset_and_unknown_table(server):
         bad = await c.call_tool("run_rules", {"model_name": "synthetic_fleet_eip", "tables": ["nope"]})
     assert ok.structured_content["tables_checked"] == ["gold_fleet.f_booking"]
     assert bad.is_error and "nope" in bad.content[0].text
+
+
+@pytest.mark.anyio
+async def test_kb_tools(server):
+    async with Client(server) as c:
+        listing = await c.call_tool("list_kb", {})
+        doc = await c.call_tool("read_kb", {"name": "glossary.md"})
+        escape = await c.call_tool("read_kb", {"name": "../conftest.py"})
+        entry = await c.call_tool("get_report_map", {"report_id": "22222222-2222-2222-2222-222222222222"})
+    assert [f["name"] for f in listing.structured_content["files"]] == ["glossary.md", "report_map.yaml"]
+    assert "Grain" in doc.structured_content["content"] and escape.is_error
+    assert entry.structured_content["tables"]["Booking"]["table"] == "gold_fleet.f_booking"
 
 
 @pytest.mark.anyio

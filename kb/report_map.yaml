@@ -1,0 +1,15 @@
+# Report-to-model map (FR-K2). Power BI report ID -> the SMX model and Gold tables behind each Power BI table.
+# Used by run_rules (report_id, for GOLD-001) and report_lineage. Keep real report IDs out of the repo:
+# point DMA_KB_DIR at a git-ignored folder (for example samples/kb) for client reports.
+#
+# Format:
+# reports:
+#   "<report GUID>":
+#     name: Fleet bookings
+#     model: synthetic_fleet_eip
+#     tables:
+#       Booking: gold_fleet.f_booking            # same column names in Power BI and Gold
+#       Driver:
+#         table: gold_fleet.d_driver
+#         columns: {Driver Name: driver_nm}      # Power BI column -> Gold column, where they differ
+reports: {}

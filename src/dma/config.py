@@ -15,6 +15,7 @@ class Settings:
     dbt_manifest: Path | None
     output_dir: Path
     config_dir: Path
+    kb_dir: Path
     transport: str
     user: str
 
@@ -34,6 +35,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         dbt_manifest=Path(manifest).resolve() if manifest else None,
         output_dir=Path(env.get("DMA_OUTPUT_DIR", "output")).resolve(),
         config_dir=Path(env.get("DMA_CONFIG_DIR", "config")).resolve(),
+        kb_dir=Path(env.get("DMA_KB_DIR", "kb")).resolve(),
         transport=env.get("DMA_TRANSPORT", "stdio").strip() or "stdio",
         # Recorded on every gate decision. The server cannot verify it, so it is an audit label, not authentication.
         user=env.get("DMA_USER", "").strip() or _os_user(),

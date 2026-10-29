@@ -12,6 +12,7 @@ from dma.config import Settings, load_yaml
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
 from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
+from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.dbt_manifest import DbtManifest, DbtUpstream, ManifestError
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
@@ -41,6 +42,11 @@ class RuleRun(BaseModel):
     findings: list[Finding]
 
 
+class KbListing(BaseModel):
+    kb_dir: str
+    files: list[KbFile]
+
+
 class SessionList(BaseModel):
     sessions: list[SessionSummary]
 
@@ -61,6 +67,7 @@ class DmaTools:
         self._pbi_client: PowerBIClient | None = None
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
+        self.kb = KnowledgeBase(settings.kb_dir)
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             self.gate = GateStore(self.writer, load_yaml(settings.config_dir, "gates.yaml"), user=settings.user)
@@ -118,6 +125,21 @@ class DmaTools:
             counts=dict(Counter(f.severity for f in findings)),
             findings=findings,
         )
+
+    def list_kb(self) -> KbListing:
+        return KbListing(kb_dir=str(self.settings.kb_dir), files=self.kb.list())
+
+    def read_kb(self, name: Annotated[str, Field(description="File name exactly as returned by list_kb, e.g. glossary.md.")]) -> KbDocument:
+        try:
+            return self.kb.read(name)
+        except KbError as e:
+            raise ToolError(str(e)) from e
+
+    def get_report_map(self, report_id: Annotated[str, Field(description="Power BI report ID (GUID).")]) -> ReportEntry:
+        try:
+            return self.kb.report(report_id)
+        except KbError as e:
+            raise ToolError(str(e)) from e
 
     def dbt_upstream(self, model_name: Annotated[str, Field(description="dbt model name, alias or unique_id.")]) -> DbtUpstream:
         if self.settings.dbt_manifest is None:
