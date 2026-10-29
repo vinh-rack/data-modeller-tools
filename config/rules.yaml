@@ -67,6 +67,12 @@ rules:
     hash_key_layers: [silver_idm, gold]
     hash_key_suffix: "_id"
     hash_rule_pattern: "\\b(hash|md5|sha\\d*)\\s*\\("
+  PARTY-001:
+    enabled: true
+    severity: info
+    column: data_area_party_id
+    # Rule text that counts as carrying the column forward unchanged.
+    passthrough_pattern: '^\s*(1:1( mapping)?|direct|as is)?\s*$'
   GRAIN-001:
     enabled: true
     severity_same_bu: error

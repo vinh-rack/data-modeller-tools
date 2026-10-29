@@ -86,6 +86,8 @@ def build_eip_family():
         ("gold_fleet", "f_booking", "booking_date", 1, None, "silver", "slvr_cdm.booking", "booking_date", "date", "1:1 mapping"),
         ("gold_fleet", "f_booking", "booking_amount", 1, None, "silver", "slvr_cdm.booking", "booking_amount", "decimal(18,2)", "1:1 mapping"),
         ("gold_fleet", "f_booking", "driver_nm", 1, None, "silver", "slvr_cdm.driver", "driver_nm", "string", "join driver on driver_id"),
+        # PARTY-001 violation: data_area_party_id derived in Gold instead of carried forward
+        ("gold_fleet", "f_booking", "data_area_party_id", 1, None, "silver", "slvr_cdm.booking", "booking_num", "string", "lookup party by booking_num"),
         # GRAIN-002 violation: only aggregates an existing fact
         ("gold_fleet", "agg_booking_by_driver", "-", 1, "-", "gold", "gold_fleet.f_booking", "-", None, "select driver_id, booking_month, sum(booking_amount) from gold_fleet.f_booking group by driver_id, booking_month"),
         ("gold_fleet", "agg_booking_by_driver", "driver_id", 1, "y", "gold", "gold_fleet.f_booking", "driver_id", "string", "group key"),

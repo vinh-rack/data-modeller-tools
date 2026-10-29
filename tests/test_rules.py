@@ -12,6 +12,7 @@ from dma.rules.layer_bypass import check_layer_bypass
 from dma.rules.layer_hierarchy import check_layer_hierarchy
 from dma.rules.metadata_columns import check_metadata_columns
 from dma.rules.naming import check_naming
+from dma.rules.party_id import check_party_id
 from dma.rules.one_table_per_grain import check_aggregate_should_be_view, check_one_table_per_grain
 
 
@@ -100,6 +101,18 @@ class TestMeta001:
         idm = tbl("slvr_cdm.x", Layer.SILVER_IDM, [pk("x_id"), "C_Created_TS"])
         f = run(check_metadata_columns, rules_cfg, [idm])
         assert [x.evidence["missing"] for x in f] == [["c_updated_ts", "c_source_system"]]
+
+
+class TestParty001:
+    def test_pass_carried_forward(self, rules_cfg):
+        t = tbl("gold_fleet.f_x", Layer.GOLD, [Column(name="data_area_party_id", source_column="data_area_party_id", rules="1:1 mapping")])
+        silver = tbl("slvr_cdm.x", Layer.SILVER_IDM, [Column(name="data_area_party_id", source_column="company_code", rules="lookup party")])
+        assert run(check_party_id, rules_cfg, [t, silver]) == []
+
+    def test_fail_derived_in_gold(self, rules_cfg):
+        t = tbl("gold_fleet.f_x", Layer.GOLD, [Column(name="data_area_party_id", source_column="company_code", rules="lookup party")])
+        f = run(check_party_id, rules_cfg, [t])
+        assert [x.rule_id for x in f] == ["PARTY-001"] and "company_code" in f[0].message and "derives" in f[0].message
 
 
 class TestFact001:
@@ -198,9 +211,9 @@ def test_every_rule_fires_on_fixture(index, rules_cfg):
     targets = index.get_model("synthetic_fleet_eip")
     usage = {f"{t.qualified}.{c.name}" for t in targets for c in t.columns if c.name != "booking_date"}
     findings = run_rules(RuleContext(index=index, targets=targets, config=rules_cfg, column_usage=usage))
-    fired = {f.rule_id for f in findings if f.severity != "info"}
+    fired = {f.rule_id for f in findings if f.evidence.get("status") not in ("skipped", "unresolved")}
     enabled = {r for r in REGISTRY if rule_config(rules_cfg, r).get("enabled", True)}
-    assert fired == enabled == {"LAYER-001", "KEY-001", "META-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
+    assert fired == enabled == {"LAYER-001", "KEY-001", "META-001", "PARTY-001", "FACT-001", "NAME-001", "GOLD-001", "GRAIN-001", "GRAIN-002"}
     assert set(REGISTRY) - enabled == {"LAYER-002"}
     for f in findings:
         assert f.rule_id and f.severity and f.table and f.message and isinstance(f.evidence, dict)
