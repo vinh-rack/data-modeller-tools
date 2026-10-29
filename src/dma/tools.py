@@ -40,6 +40,7 @@ class RuleRun(BaseModel):
     tables_checked: list[str]
     counts: dict[str, int]
     findings: list[Finding]
+    notes: list[str] = Field(default_factory=list)
 
 
 class KbListing(BaseModel):
@@ -106,8 +107,15 @@ class DmaTools:
         self,
         model_name: Annotated[str, Field(description="Model to check, as returned by list_models.")],
         tables: Annotated[list[str] | None, Field(description="Optional subset of tables (schema.table or bare name). Omit to check the whole model.")] = None,
-        column_usage: Annotated[list[str] | None, Field(description="Optional semantic model column usage as schema.table.column entries. Needed for GOLD-001.")] = None,
+        column_usage: Annotated[list[str] | None, Field(description="Optional semantic model column usage as schema.table.column entries. Needed for GOLD-001. Prefer report_id.")] = None,
+        report_id: Annotated[str | None, Field(description="Optional Power BI report ID. The server reads the report's columns and maps them to Gold through the knowledge base report map, for GOLD-001.")] = None,
+        workspace_id: Annotated[str | None, Field(description="Workspace ID for report_id. Omit for My workspace.")] = None,
     ) -> RuleRun:
+        if report_id and column_usage is not None:
+            raise ToolError("give report_id or column_usage, not both")
+        notes: list[str] = []
+        if report_id:
+            column_usage, notes = self._report_usage(report_id, workspace_id)
         targets = self._model_tables(model_name)
         if tables:
             wanted = {n.lower() for n in tables}
@@ -124,7 +132,22 @@ class DmaTools:
             tables_checked=[t.qualified for t in targets],
             counts=dict(Counter(f.severity for f in findings)),
             findings=findings,
+            notes=notes,
         )
+
+    def _report_usage(self, report_id: str, workspace_id: str | None) -> tuple[list[str], list[str]]:
+        """Gold columns a report uses, from its Power BI columns and the report map. Unmapped tables are noted, not guessed."""
+        try:
+            entry = self.kb.report(report_id)
+            md = model_metadata(self._pbi(), report_id, workspace_id)
+        except (KbError, PowerBIError) as e:
+            raise ToolError(str(e)) from e
+        usage = sorted({g for c in md.columns if c.table and c.column and (g := entry.gold_column(c.table, c.column))})
+        unmapped = sorted({c.table for c in md.columns if c.table and c.table not in entry.tables})
+        notes = [f"GOLD-001 usage: {len(usage)} Gold columns from report {report_id}"]
+        if unmapped:
+            notes.append(f"Power BI tables not in the report map, so their columns count as unknown usage: {', '.join(unmapped)}")
+        return usage, notes
 
     def list_kb(self) -> KbListing:
         return KbListing(kb_dir=str(self.settings.kb_dir), files=self.kb.list())

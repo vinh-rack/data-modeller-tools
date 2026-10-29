@@ -21,7 +21,8 @@ def server(tmp_path):
         "DMA_KB_DIR": str(FIXTURES / "kb"),
         "DMA_DBT_MANIFEST": str(FIXTURES / "dbt" / "manifest.json"),
     })
-    return build_server(DmaTools(settings))
+    # No live Power BI in tests: the report usage test patches model_metadata, so the client is never used.
+    return build_server(DmaTools(settings, pbi_factory=object))
 
 
 @pytest.mark.anyio
@@ -64,6 +65,25 @@ async def test_kb_tools(server):
     assert [f["name"] for f in listing.structured_content["files"]] == ["glossary.md", "report_map.yaml"]
     assert "Grain" in doc.structured_content["content"] and escape.is_error
     assert entry.structured_content["tables"]["Booking"]["table"] == "gold_fleet.f_booking"
+
+
+@pytest.mark.anyio
+async def test_run_rules_usage_from_report(server, monkeypatch):
+    from dma import tools as tools_mod
+    from dma.connectors.powerbi import PbiColumn, PbiModelMetadata
+
+    cols = [PbiColumn(table="Booking", column=c) for c in ("booking_id", "driver_id", "booking_amount", "driver_nm", "data_area_party_id")] + [PbiColumn(table="Calendar", column="date")]
+    md = PbiModelMetadata(report_id="r", dataset_id="d", workspace_id=None, tables=["Booking", "Calendar"], columns=cols, measures=None, measures_status="x", m_transforms=None, m_transforms_status="x", truncated=False, routes_tried=[])
+    monkeypatch.setattr(tools_mod, "model_metadata", lambda client, report_id, workspace_id: md)
+    report = "22222222-2222-2222-2222-222222222222"
+    async with Client(server) as c:
+        r = await c.call_tool("run_rules", {"model_name": "synthetic_fleet_eip", "tables": ["f_booking"], "report_id": report})
+        both = await c.call_tool("run_rules", {"model_name": "synthetic_fleet_eip", "report_id": report, "column_usage": []})
+        unmapped = await c.call_tool("run_rules", {"model_name": "synthetic_fleet_eip", "report_id": "33333333-3333-3333-3333-333333333333"})
+    data = r.structured_content
+    assert [f["column"] for f in data["findings"] if f["rule_id"] == "GOLD-001"] == ["booking_date"]
+    assert "Calendar" in data["notes"][1]
+    assert both.is_error and unmapped.is_error and "not in" in unmapped.content[0].text
 
 
 @pytest.mark.anyio

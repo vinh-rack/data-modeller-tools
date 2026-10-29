@@ -27,7 +27,7 @@ TOOLS = [
     ("get_model", "Return every table of one SMX model: layer, schema, BU, grain (PK columns), columns and source tables.", READ_ONLY),
     ("find_tables_by_bronze", "Find modelled tables in any SMX that source from a bronze table, directly or through upstream layers. Use for reuse checks.", READ_ONLY),
     ("find_tables_by_grain", "Find tables in any SMX whose grain (PK column set) equals the given columns. Use to check one table per grain.", READ_ONLY),
-    ("run_rules", "Run the deterministic rules (LAYER-001, LAYER-002 when enabled, FACT-001, NAME-001, GOLD-001, KEY-001, META-001, PARTY-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence.", READ_ONLY),
+    ("run_rules", "Run the deterministic rules (LAYER-001, LAYER-002 when enabled, FACT-001, NAME-001, GOLD-001, KEY-001, META-001, PARTY-001, GRAIN-001, GRAIN-002) on a model or chosen tables and return findings with evidence. Pass report_id so GOLD-001 checks Gold columns against the report.", READ_ONLY),
     ("list_kb", "List the knowledge base files (glossary, conventions, report-to-model map) in DMA_KB_DIR.", READ_ONLY),
     ("read_kb", "Read one knowledge base file by the exact name list_kb returned. Use it to explain findings, never to re-derive run_rules checks.", READ_ONLY),
     ("get_report_map", "Return the report-to-model map entry for a Power BI report: its SMX model and the Gold table behind each Power BI table.", READ_ONLY),
