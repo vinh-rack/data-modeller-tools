@@ -13,12 +13,12 @@ This skill is a stub. Follow the review skill's ground rules (`dma-review`, sect
 ## **1. Stages (outline)**
 
 1. `scope`: workspace ID, report ID, optional dataset ID, BU. Gate.
-2. `powerbi_intake`: `pbi_get_report` and `pbi_model_metadata` for tables, columns, measures, data sources and M transforms, or "not available" with the route tried. Gate.
+2. `powerbi_intake`: `pbi_get_report` and `pbi_model_metadata` for tables, columns, measures, data sources and M transforms, or "not available" with the route tried. Leave `workspace_id` out for My workspace. Call `get_report_map` to see which Power BI tables already map to Gold. Gate.
 3. `source_tables`: source tables from the data sources and M transforms, or the source table sheet as fallback. Gate.
 4. `bronze_identification`: entity logic from the dbt repo, `dbt_upstream` on the entity model, then `find_tables_by_bronze` for reuse. If a bronze table is already modelled, reuse it and check only missing columns. Gate.
 5. `silver_staging`: close to bronze, minimal joins. Gate.
 6. `silver_idm`: mostly 1:1 with staging plus key mapping (party). Grain check with `find_tables_by_grain`: same grain in another BU means flag CDM promotion; an aggregation of an existing fact means propose a view. Gate.
 7. `gold`: keys-only facts, report columns only, Power Query aggregations moved here. Gate.
-8. `rules_pass`: `run_rules` on the proposed tables. Gate.
+8. `rules_pass`: `run_rules` on the proposed tables with `report_id`, so GOLD-001 checks Gold columns against the report. Show `report_lineage` for the report, with every unknown table and its reason. Gate.
 
-After gate 8 is approved: `compile_report(session_id)`, then `write_artifact(..., session_id)` for proposed SMX rows and lineage, built from approved stages only.
+After gate 8 is approved: `compile_report(session_id)`, then `write_artifact(..., session_id)` for proposed SMX rows and lineage (`lineage_mermaid` from the approved `report_lineage` or `lineage_diagram` output), built from approved stages only.

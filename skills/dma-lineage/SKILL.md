@@ -12,9 +12,9 @@ This skill is a stub. Tag every statement as `[confirmed]`, `[inferred]`, `[assu
 
 ## **1. Stages (outline)**
 
-1. `scope`: the starting point, which is a bronze table, an SMX table, a dbt model or a SQL statement plus column. Gate.
-2. `bronze_dependencies`: `find_tables_by_bronze` (downstream) or `get_model` source tables (upstream), and `dbt_upstream` for dbt models. Gate.
+1. `scope`: the starting point, which is a bronze table, an SMX table, a Power BI report, a dbt model or a SQL statement plus column. Gate.
+2. `bronze_dependencies`: `lineage_diagram` for an SMX table (`upstream`, `downstream` or `both`), `report_lineage` for a Power BI report, and `dbt_upstream` for dbt models. Report inferred nodes and unknown tables with their reasons. Gate.
 3. `column_lineage`: `sql_column_lineage` with the right dialect (`redshift` for current sources, `databricks` for the target platform). If column lineage is not needed, say so as the stage output. Gate.
-4. `diagram`: the lineage as a table and a Mermaid `flowchart LR`. Gate.
+4. `diagram`: the lineage as a table and the `mermaid` text returned by `lineage_diagram` or `report_lineage`, unchanged. Never draw the diagram yourself. Gate.
 
 After gate 4 is approved: `compile_report(session_id)`, then `write_artifact(kind="lineage_mermaid", ..., session_id)` with the approved diagram.
