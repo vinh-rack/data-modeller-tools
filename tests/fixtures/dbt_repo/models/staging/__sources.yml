@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: shop
+    schema: raw
+    description: Synthetic shop system
+    tables:
+      - name: raw_a
+        description: Synthetic table A
+      - name: raw_b
+      - name: raw_c
+        identifier: raw_c_v2
+  # No schema: dbt uses the source name as the schema.
+  - name: legacy
+    tables:
+      - name: old_x

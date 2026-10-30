@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: stg_a
+    description: Synthetic staging of raw_a.
+    columns:
+      - name: a_id
+        description: Key of A.
+      - name: a_nm
+  - name: stg_b
+    config:
+      alias: stg_b_alias
+  - name: stg_versioned
+    latest_version: 2
+    versions:
+      - v: 2

@@ -1,0 +1,6 @@
+# Synthetic dbt project for tests, shaped like dbt-labs/jaffle-shop. All names are invented. Never run dbt here.
+name: shop_pkg
+config-version: 2
+profile: default
+model-paths: ["models"]
+seed-paths: ["seeds"]
