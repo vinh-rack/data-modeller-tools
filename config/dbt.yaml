@@ -1,0 +1,9 @@
+# dbt repository reader (REQUIREMENTS D3, FR-K4). The repo is read as code only: no dbt command runs and no Jinja is rendered.
+
+# Resource types whose relations count as bronze at the end of an upstream walk. Add "seed" to treat seeds as bronze.
+bronze_resource_types: [source]
+# SQLGlot dialect used to check that rendered model SQL parses.
+dialect: databricks
+# git pull --ff-only runs at most once per this many hours (DMA_DBT_PULL=auto).
+pull_interval_hours: 24
+git_timeout_seconds: 60

@@ -13,6 +13,8 @@ import yaml
 class Settings:
     smx_dir: Path
     dbt_manifest: Path | None
+    dbt_repo: Path | None
+    dbt_pull: str
     output_dir: Path
     config_dir: Path
     kb_dir: Path
@@ -30,9 +32,15 @@ def _os_user() -> str:
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     env = os.environ if env is None else env
     manifest = env.get("DMA_DBT_MANIFEST", "").strip()
+    repo = env.get("DMA_DBT_REPO", "").strip()
+    pull = env.get("DMA_DBT_PULL", "").strip().lower() or "auto"
+    if pull not in ("auto", "off"):
+        raise ValueError(f"DMA_DBT_PULL must be auto or off, got {pull!r}")
     return Settings(
         smx_dir=Path(env.get("DMA_SMX_DIR", "tests/fixtures/smx")).resolve(),
         dbt_manifest=Path(manifest).resolve() if manifest else None,
+        dbt_repo=Path(repo).resolve() if repo else None,
+        dbt_pull=pull,
         output_dir=Path(env.get("DMA_OUTPUT_DIR", "output")).resolve(),
         config_dir=Path(env.get("DMA_CONFIG_DIR", "config")).resolve(),
         kb_dir=Path(env.get("DMA_KB_DIR", "kb")).resolve(),
