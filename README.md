@@ -17,9 +17,9 @@ uv run pytest
 uv run python scripts/smoke_client.py
 ```
 
-The smoke client starts `dma-server` over stdio, lists the 16 tools, runs `run_rules` on the synthetic fixture model, and runs one gated session to final approval in a temp folder. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
+The smoke client starts `dma-server` over stdio, lists the 21 tools, runs `run_rules` on the synthetic fixture model, and runs one gated session to final approval in a temp folder. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
 
-To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls the SMX, lineage and gate tools on the fixtures (the Power BI tools need a live token, so they are left out) and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
+To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls the SMX, knowledge base, lineage and gate tools on the fixtures (the tools that read Power BI need a live token, so they are left out) and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
 
 Optional: the [MCP Inspector](https://github.com/modelcontextprotocol/inspector) needs Node 22.19 or newer. In its UI, choose a stdio connection with command `uv` and arguments `run --quiet dma-server`, started from the repo root.
 
@@ -33,9 +33,10 @@ Copy `.env.example` to `.env` and edit it. `.env` is git-ignored, and the server
 | `DMA_DBT_MANIFEST` | unset | Path to a dbt `manifest.json` (schema v12), used by `dbt_upstream`. |
 | `DMA_OUTPUT_DIR` | `output` | The only folder the server writes to: artifacts, plus gate logs in `.sessions/`. It must not be inside `DMA_SMX_DIR`. |
 | `DMA_CONFIG_DIR` | `config` | Folder holding `smx_mapping.yaml`, `rules.yaml` and `gates.yaml`. |
+| `DMA_KB_DIR` | `kb` | Knowledge base folder: glossary, conventions and `report_map.yaml`. The repo copy holds templates only, so point this at a git-ignored folder (for example `samples/kb`) for client files. |
 | `DMA_USER` | OS user | Name recorded on every gate decision. It is an audit label, not authentication. |
 | `DMA_TRANSPORT` | `stdio` | Only `stdio` is enabled in v1. |
-| `PBI_ACCESS_TOKEN` | empty | Power BI bearer token, with or without the `Bearer ` prefix. See 3.3. Never commit it. |
+| `PBI_ACCESS_TOKEN` | empty | Power BI bearer token, with or without the `Bearer ` prefix. See 3.4. Never commit it. |
 | `PBI_API_BASE` | `https://api.powerbi.com/v1.0/myorg` | Power BI REST base URL. Must be https. |
 | `PBI_MAX_ROWS` | `5000` | Row cap for metadata DAX queries. |
 | `PBI_REPORT_ID`, `PBI_DATASET_ID`, `PBI_WORKSPACE_ID` | empty | Used only by `scripts/pbi_probe.py`. Leave the workspace empty for My workspace. |
@@ -88,6 +89,11 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `run_rules` | no | Runs the deterministic rules and returns findings |
 | `dbt_upstream` | no | Lists the bronze sources of a dbt model from the manifest |
 | `sql_column_lineage` | no | Traces a SQL output column to its source columns (SQLGlot) |
+| `lineage_diagram` | no | Builds table-level lineage from the SMX index, upstream, downstream or both, with a Mermaid flowchart |
+| `report_lineage` | no | Traces each Power BI table of a report through its Gold table to Bronze, or marks it unknown with the reason |
+| `list_kb` | no | Lists the knowledge base files |
+| `read_kb` | no | Reads one knowledge base file by its exact listed name |
+| `get_report_map` | no | Returns a report's SMX model and the Gold table behind each Power BI table |
 | `pbi_get_report` | no | Reads a Power BI report, its semantic model and its data sources by ID |
 | `pbi_model_metadata` | no | Lists the semantic model's tables, columns, measures and M transforms, with the routes tried |
 | `start_session` | gate log | Starts a gated `review`, `build` or `lineage` session and returns its stages |
@@ -98,11 +104,32 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `compile_report` | `output/` only | After final approval, writes the report and decisions files from approved stages plus the decision log |
 | `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json`, `proposed_smx_xlsx` or `lineage_mermaid` as a new file |
 
-Every finding has `rule_id`, `severity`, `layer`, `table`, `column`, `message` and `evidence`. The v0 rules are LAYER-001, FACT-001, NAME-001, GOLD-001, GRAIN-001 and GRAIN-002. They are configured in `config/rules.yaml`.
+Every finding has `rule_id`, `severity`, `layer`, `table`, `column`, `message` and `evidence`. The rules are configured in `config/rules.yaml`:
+
+| Rule id | Requirement | Checks |
+| --- | --- | --- |
+| LAYER-001 | RULE-1 | A table sources only from its own layer or upstream |
+| LAYER-002 | RULE-2 | No layer bypass. Off by default until Q2 is answered |
+| FACT-001 | RULE-3 | Gold facts hold keys and measures only |
+| NAME-001 | RULE-4 | snake_case, Gold prefixes, `_vw` suffix, no `_lookup` or `_enum` |
+| GOLD-001 | RULE-5 | Every Gold column is used by the report. Pass `report_id` to `run_rules` |
+| GRAIN-001 | RULE-6 | One table per grain and BU, CDM promotion across BUs |
+| GRAIN-002 | RULE-7 | An aggregate of an existing fact should be a view |
+| KEY-001 | RULE-8 | `_num` natural keys, `_id` hash keys, with the key type inferred from the layer and hash() rules |
+| META-001 | RULE-9 | `c_created_ts`, `c_updated_ts` and `c_source_system` on Silver |
+| PARTY-001 | RULE-11 | Gold carries `data_area_party_id` forward 1:1 |
+
+RULE-10 (load behaviour documented) is not built: the SMX layouts have no SCD or load type column to check, so it waits for the official template (Q1).
 
 `config/smx_mapping.yaml` maps SMX sheet names and header aliases to fields. It is a placeholder built from the observed layouts, so confirm it against the official SMX template.
 
-### *3.2. Step gate*
+### *3.2. Knowledge base and lineage*
+
+`kb/report_map.yaml` maps a Power BI report ID to its SMX model and the Gold table behind each Power BI table, with optional column renames. `run_rules` with `report_id` reads the report's columns from Power BI and maps them to Gold for GOLD-001, so nobody types a usage list. `report_lineage` uses the same map to go from the report to Gold to Bronze. A Power BI table that is not in the map is reported as unknown, never guessed.
+
+`lineage_diagram` and `report_lineage` build the Mermaid text in code. Nodes are confirmed when the table is in the SMX index and inferred when it is only named in a source cell. An unqualified source name is matched only in its own layer, because names like `vehicle_master` exist in several layers.
+
+### *3.3. Step gate*
 
 The stage lists for each flow live in `config/gates.yaml`. A session keeps the list it started with.
 
@@ -112,7 +139,7 @@ The stage lists for each flow live in `config/gates.yaml`. A session keeps the l
 - Every event goes to `output/.sessions/<session_id>/events.jsonl`, append-only, with the user and a UTC timestamp. State is rebuilt from that file, so sessions survive a server restart. Use `list_sessions` and `get_session` to resume.
 - The server cannot see the modeller. The skills tell the IDE model to pass only the modeller's explicit word, and the server refuses anything other than the three decision values.
 
-### *3.3. Power BI*
+### *3.4. Power BI*
 
 The client is read-only by construction. Every request is checked against an allowlist before it is sent: GET on report, dataset and datasource metadata, and POST only to the two DAX query endpoints. DAX must be a plain `EVALUATE` query, and results are capped at `PBI_MAX_ROWS`. With no workspace ID the My workspace paths are used, and with one the `groups/{id}/` paths.
 
