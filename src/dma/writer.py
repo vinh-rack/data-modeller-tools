@@ -24,6 +24,9 @@ EVENTS_FILE = "events.jsonl"
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_SESSION_BYTES = 50 * 1024 * 1024
+DBT_DIR = ".dbt"
+PULL_LOG = "pulls.jsonl"
+MAX_PULL_LOG_BYTES = 5 * 1024 * 1024
 
 
 class WriterError(ValueError):
@@ -123,6 +126,37 @@ class ArtifactWriter:
         target = self.session_log(session_id)
         if not target.is_file():
             raise WriterError(f"unknown session: {session_id}")
+        with open(target, encoding="utf-8") as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def dbt_pull_log(self) -> Path:
+        """Path of output/.dbt/pulls.jsonl, the append-only record of daily dbt repo pulls. Same symlink and junction checks as session logs."""
+        folder = self.root / DBT_DIR
+        target = folder / PULL_LOG
+        for p in (folder, target):
+            if p.is_symlink():
+                raise WriterError(f"refusing to use a symlink in the dbt pull log path: {p.name}")
+        if target.resolve() != target:
+            raise WriterError("dbt pull log path escapes the output root")
+        return target
+
+    def append_dbt_pull(self, record: dict) -> None:
+        """Append one JSON line to the dbt pull log. Lines are never rewritten; the last line is the latest pull."""
+        target = self.dbt_pull_log()
+        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+        if len(line) > MAX_EVENT_BYTES:
+            raise WriterError(f"dbt pull record larger than {MAX_EVENT_BYTES} bytes")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.dbt_pull_log()
+        if target.is_file() and target.stat().st_size + len(line) > MAX_PULL_LOG_BYTES:
+            raise WriterError(f"dbt pull log would exceed {MAX_PULL_LOG_BYTES} bytes")
+        with open(target, "ab") as fh:
+            fh.write(line)
+
+    def read_dbt_pulls(self) -> list[dict]:
+        target = self.dbt_pull_log()
+        if not target.is_file():
+            return []
         with open(target, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 

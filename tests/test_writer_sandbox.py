@@ -198,3 +198,55 @@ def test_list_session_ids(writer, out):
 def test_artifacts_never_land_in_sessions(writer):
     with pytest.raises(WriterError):
         writer.safe_path(".sessions/x.md")
+
+
+def test_dbt_pull_log_is_append_only(writer, out):
+    assert writer.read_dbt_pulls() == []
+    writer.append_dbt_pull({"n": 1})
+    writer.append_dbt_pull({"n": 2})
+    assert writer.read_dbt_pulls() == [{"n": 1}, {"n": 2}]
+    assert writer.dbt_pull_log() == out / ".dbt" / "pulls.jsonl"
+
+
+def test_dbt_pull_log_size_cap(writer, monkeypatch):
+    import dma.writer as w
+
+    writer.append_dbt_pull({"n": 1})
+    monkeypatch.setattr(w, "MAX_PULL_LOG_BYTES", 15)
+    with pytest.raises(WriterError, match="exceed"):
+        writer.append_dbt_pull({"n": 2})
+    assert writer.read_dbt_pulls() == [{"n": 1}]
+
+
+def test_dbt_dir_symlink_refused(writer, out, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    try:
+        os.symlink(outside, out / ".dbt", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this machine")
+    with pytest.raises(WriterError, match="symlink"):
+        writer.append_dbt_pull({"n": 1})
+    assert list(outside.iterdir()) == []
+
+
+def test_dbt_dir_junction_refused(writer, out, tmp_path):
+    if os.name != "nt":
+        pytest.skip("junctions are Windows only")
+    import subprocess
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(out / ".dbt"), str(outside)], capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("could not create a junction")
+    with pytest.raises(WriterError):
+        writer.append_dbt_pull({"n": 1})
+    assert list(outside.iterdir()) == []
+
+
+def test_artifacts_never_land_in_dbt_dir(writer):
+    with pytest.raises(WriterError):
+        writer.safe_path(".dbt/pulls.jsonl")
