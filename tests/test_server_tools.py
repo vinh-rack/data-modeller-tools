@@ -9,7 +9,7 @@ from dma.server import build_server
 from dma.tools import DmaTools
 
 WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_upstream", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_model_lookup", "dbt_upstream", "dbt_repo_status", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
 @pytest.fixture
@@ -190,3 +190,49 @@ async def test_compile_report_uses_approved_content_only(server, tmp_path):
     assert [s["content"] for s in data["approved_stages"]] == ["APPROVED scope", "APPROVED bronze_dependencies", "APPROVED column_lineage", "APPROVED diagram"]
     assert [e["decision"] for e in data["decision_log"]] == ["suggest_changes", "approve", "disapprove", "approve", "approve", "approve"]
     assert "SUPERSEDED" not in json.dumps(data["approved_stages"])
+
+
+@pytest.fixture
+def dbt_server(tmp_path):
+    settings = load_settings({
+        "DMA_SMX_DIR": str(SMX_DIR),
+        "DMA_OUTPUT_DIR": str(tmp_path / "output"),
+        "DMA_CONFIG_DIR": str(CONFIG_DIR),
+        "DMA_DBT_REPO": str(FIXTURES / "dbt_repo"),
+        # The manifest is set too, to show the repo reader wins. No git runs in tests.
+        "DMA_DBT_MANIFEST": str(FIXTURES / "dbt" / "manifest.json"),
+        "DMA_DBT_PULL": "off",
+    })
+    return build_server(DmaTools(settings, pbi_factory=object))
+
+
+@pytest.mark.anyio
+async def test_dbt_model_lookup_found_and_missing(dbt_server):
+    async with Client(dbt_server) as c:
+        found = (await c.call_tool("dbt_model_lookup", {"name": "stg_c_clean"})).structured_content
+        missing = (await c.call_tool("dbt_model_lookup", {"name": "stg_zzz"})).structured_content
+    m = found["models"][0]
+    assert found["exists"] and found["route"] == "dbt_model" and (m["name"], m["match"], m["alias"]) == ("stg_c", "alias", "stg_c_clean")
+    assert m["path"] == "models/staging/stg_c.sql" and "{{" in m["raw_sql"] and "{{" not in m["rendered_sql"] and m["parses"]
+    assert [s["table"] for s in m["sources"]] == ["raw_c"] and [u["kind"] for u in m["unresolved"]] == ["jinja_expression", "incremental_block"]
+    assert (missing["exists"], missing["route"], missing["models"]) == (False, "data_analysis", []) and "data analysis" in missing["note"]
+
+
+@pytest.mark.anyio
+async def test_dbt_upstream_uses_repo_over_manifest(dbt_server):
+    async with Client(dbt_server) as c:
+        up = (await c.call_tool("dbt_upstream", {"model_name": "mart_ab"})).structured_content
+    assert up["reader"] == "repo" and [b["table"] for b in up["bronze_tables"]] == ["legacy.old_x", "raw.raw_a", "raw.raw_b"]
+
+
+@pytest.mark.anyio
+async def test_dbt_upstream_manifest_fallback_and_status(server, dbt_server):
+    async with Client(server) as c:
+        fallback = (await c.call_tool("dbt_upstream", {"model_name": "fct_booking"})).structured_content
+        unset = (await c.call_tool("dbt_repo_status", {})).structured_content
+        lookup = await c.call_tool("dbt_model_lookup", {"name": "x"})
+    async with Client(dbt_server) as c:
+        status = (await c.call_tool("dbt_repo_status", {})).structured_content
+    assert fallback["reader"] == "manifest" and unset["configured"] is False and lookup.is_error and "DMA_DBT_REPO" in lookup.content[0].text
+    assert (status["project"], status["models"], status["sources"], status["seeds"]) == ("shop_pkg", 9, 4, 1)
+    assert status["this_session_pull"]["status"] == "skipped_off" and status["pull_mode"] == "off"

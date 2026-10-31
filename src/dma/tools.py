@@ -14,7 +14,10 @@ from dma.gate import After, Decision, GateError, GateStore, SessionSummary, Sess
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.diagram import Direction, LineageGraph, ReportLineage, report_lineage, table_lineage
-from dma.lineage.dbt_manifest import DbtManifest, DbtUpstream, ManifestError
+from dma.lineage.dbt_manifest import DbtManifest, ManifestError
+from dma.lineage.dbt_models import DbtUpstream, Unresolved
+from dma.lineage.dbt_pull import DbtPuller, PullResult
+from dma.lineage.dbt_repo import DbtColumn, DbtRef, DbtRepo, DbtRepoError, DbtSourceRef
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
 from dma.rules import RuleContext, run_rules
@@ -49,6 +52,45 @@ class KbListing(BaseModel):
     files: list[KbFile]
 
 
+class DbtModelDetail(BaseModel):
+    name: str
+    match: str = Field(description="How the name matched: name, alias or source_table")
+    path: str
+    alias: str | None
+    relation: str
+    description: str | None
+    columns: list[DbtColumn]
+    raw_sql: str
+    rendered_sql: str
+    parses: bool
+    parse_error: str | None
+    refs: list[DbtRef]
+    sources: list[DbtSourceRef]
+    unresolved: list[Unresolved]
+
+
+class DbtLookup(BaseModel):
+    query: str
+    exists: bool
+    route: Literal["dbt_model", "data_analysis"]
+    note: str
+    models: list[DbtModelDetail]
+
+
+class DbtRepoStatus(BaseModel):
+    configured: bool
+    repo: str | None
+    project: str | None = None
+    pull_mode: str
+    this_session_pull: PullResult | None = None
+    last_logged_pull: dict | None = None
+    commit: str | None = None
+    models: int = 0
+    sources: int = 0
+    seeds: int = 0
+    problems: list[str] = Field(default_factory=list)
+
+
 class SessionList(BaseModel):
     sessions: list[SessionSummary]
 
@@ -70,6 +112,8 @@ class DmaTools:
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.kb = KnowledgeBase(settings.kb_dir)
+        self.dbt_cfg = load_yaml(settings.config_dir, "dbt.yaml")
+        self._dbt_pull: PullResult | None = None
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             self.gate = GateStore(self.writer, load_yaml(settings.config_dir, "gates.yaml"), user=settings.user)
@@ -187,13 +231,54 @@ class DmaTools:
             raise ToolError(str(e)) from e
         return report_lineage(self.index, entry, md.tables)
 
-    def dbt_upstream(self, model_name: Annotated[str, Field(description="dbt model name, alias or unique_id.")]) -> DbtUpstream:
+    @cached_property
+    def _dbt_puller(self) -> DbtPuller:
+        return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)))
+
+    @cached_property
+    def dbt_repo(self) -> DbtRepo:
+        """The local dbt clone, read once per server process after the daily pull. Raises ToolError when not configured."""
+        if self.settings.dbt_repo is None:
+            raise ToolError("DMA_DBT_REPO is not set. Clone the dbt repo once and point DMA_DBT_REPO at it.")
+        # The pull runs before the first read, so a session sees the files of at most one day ago (D3).
+        self._dbt_pull = self._dbt_puller.maybe_pull()
+        try:
+            return DbtRepo.load(self.settings.dbt_repo)
+        except DbtRepoError as e:
+            raise ToolError(str(e)) from e
+
+    def dbt_model_lookup(self, name: Annotated[str, Field(description="Model file name, alias, or a source table name such as raw_orders. Exact match only.")]) -> DbtLookup:
+        repo = self.dbt_repo
+        dialect = self.dbt_cfg.get("dialect", "databricks")
+        models = []
+        for m, how in repo.find_models(name):
+            r = repo.render(m, dialect)
+            models.append(DbtModelDetail(name=m.name, match=how, path=m.path, alias=m.alias, relation=m.relation, description=m.description, columns=m.columns, raw_sql=r.raw_sql, rendered_sql=r.rendered_sql, parses=r.parses, parse_error=r.parse_error, refs=r.refs, sources=r.sources, unresolved=r.unresolved))
+        if models:
+            note = f"{len(models)} dbt model(s) match {name!r}. Use the logic as the Silver Staging reference; items under unresolved were not evaluated."
+        else:
+            note = f"No dbt model matches {name!r} by file name, alias or source table. Route it to data analysis (FR-B9). Do not pick a similar name without asking the modeller."
+        return DbtLookup(query=name, exists=bool(models), route="dbt_model" if models else "data_analysis", note=note, models=models)
+
+    def dbt_upstream(self, model_name: Annotated[str, Field(description="dbt model file name or alias (repo reader), or a manifest name, alias or unique_id (manifest fallback).")]) -> DbtUpstream:
+        if self.settings.dbt_repo is not None:
+            return self.dbt_repo.upstream(model_name, list(self.dbt_cfg.get("bronze_resource_types", ["source"])), self.dbt_cfg.get("dialect", "databricks"))
         if self.settings.dbt_manifest is None:
-            raise ToolError("DMA_DBT_MANIFEST is not set")
+            raise ToolError("Set DMA_DBT_REPO to a local dbt clone (DMA_DBT_MANIFEST is only a fallback)")
         try:
             return DbtManifest.load(self.settings.dbt_manifest).upstream(model_name)
         except ManifestError as e:
             raise ToolError(str(e)) from e
+
+    def dbt_repo_status(self) -> DbtRepoStatus:
+        if self.settings.dbt_repo is None:
+            return DbtRepoStatus(configured=False, repo=None, pull_mode=self.settings.dbt_pull)
+        repo = self.dbt_repo
+        return DbtRepoStatus(
+            configured=True, repo=str(self.settings.dbt_repo), project=repo.name, pull_mode=self.settings.dbt_pull,
+            this_session_pull=self._dbt_pull, last_logged_pull=self._dbt_puller.last(), commit=self._dbt_puller.head(),
+            models=len(repo.models), sources=len(repo.sources), seeds=len(repo.seeds), problems=repo.problems,
+        )
 
     def sql_column_lineage(
         self,
