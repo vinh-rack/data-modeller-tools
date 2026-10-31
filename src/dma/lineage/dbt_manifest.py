@@ -5,26 +5,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from dma.lineage.dbt_models import BronzeSource, DbtUpstream
 
 
 class ManifestError(ValueError):
     pass
-
-
-class BronzeSource(BaseModel):
-    unique_id: str
-    table: str
-    source_name: str | None = None
-
-
-class DbtUpstream(BaseModel):
-    model: str
-    unique_id: str
-    bronze_tables: list[BronzeSource]
-    via_models: list[str]
-    missing_nodes: list[str]
-    manifest_schema: str | None
 
 
 class DbtManifest:

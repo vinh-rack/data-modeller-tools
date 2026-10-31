@@ -6,12 +6,15 @@ and model SQL is read as text.
 
 import re
 from pathlib import Path
+from collections import deque
 from typing import Any, Literal
 
 import sqlglot
 import yaml
 from pydantic import BaseModel, Field
 from sqlglot.errors import SqlglotError
+
+from dma.lineage.dbt_models import BronzeSource, DbtUpstream, Unresolved
 
 PROJECT_FILE = "dbt_project.yml"
 # alias='x' or alias="x" inside a {{ config(...) }} call. Only literal strings are read.
@@ -78,13 +81,6 @@ class DbtRef(BaseModel):
 class DbtSourceRef(BaseModel):
     source: str
     table: str
-    line: int
-
-
-class Unresolved(BaseModel):
-    kind: Literal["missing_ref", "missing_source", "jinja_expression", "jinja_tag", "incremental_block"]
-    text: str
-    path: str
     line: int
 
 
@@ -173,6 +169,75 @@ class DbtRepo:
             stem = self.versions[key].get(version if version is not None else self.latest.get(key, -1))
             return self.models.get(stem) if stem else None
         return self.models.get(key) if version is None else None
+
+    def find_models(self, name: str) -> list[tuple[DbtModel, Literal["name", "alias", "source_table"]]]:
+        """Exact, case-insensitive matches: file name, then alias, then every model whose source() names that table. Never fuzzy."""
+        key = name.strip().lower()
+        hits: list[tuple[DbtModel, Literal["name", "alias", "source_table"]]] = []
+        by_name = self.model_node(key)
+        if by_name:
+            hits.append((by_name, "name"))
+        hits += [(m, "alias") for m in self.models.values() if m.alias and m.alias.lower() == key]
+        tables = {k for k, st in self.sources.items() if key in (st.table.lower(), st.identifier.lower())}
+        for m in self.models.values():
+            text = _COMMENT.sub("", self.raw_sql(m))
+            if any((s.group("s").lower(), s.group("t").lower()) in tables for s in _SOURCE.finditer(text)):
+                hits.append((m, "source_table"))
+        seen: set[str] = set()
+        return [(m, how) for m, how in hits if not (m.name in seen or seen.add(m.name))]
+
+    def unique_id(self, kind: str, *parts: str) -> str:
+        return ".".join([kind, self.name or "project", *parts])
+
+    def upstream(self, name: str, bronze_types: list[str], dialect: str = "databricks") -> DbtUpstream:
+        """Follow ref() to upstream models until source() (and seeds, if configured as bronze). Cycles are visited once."""
+        start = next((m for m, how in self.find_models(name) if how != "source_table"), None)
+        if start is None:
+            return DbtUpstream(model=name, unique_id="", exists=False, route="data_analysis", reader="repo", bronze_tables=[], via_models=[], missing_nodes=[])
+        bronze: dict[str, BronzeSource] = {}
+        via: list[str] = []
+        missing: list[str] = []
+        seeds: list[str] = []
+        unresolved: dict[tuple[str, str, int, str], Unresolved] = {}
+        seen = {start.name.lower()}
+        queue = deque([start])
+        evidence: list[str] = []
+        while queue:
+            model = queue.popleft()
+            evidence.append(model.path)
+            r = self.render(model, dialect)
+            for u in r.unresolved:
+                unresolved[(u.kind, u.path, u.line, u.text)] = u
+            for s in r.sources:
+                st = self.sources.get((s.source.lower(), s.table.lower()))
+                where = f"{model.path}:{s.line}"
+                if st:
+                    bronze.setdefault(st.relation, BronzeSource(unique_id=self.unique_id("source", st.source, st.table), table=st.relation, source_name=st.source, evidence=where))
+                else:
+                    u = Unresolved(kind="missing_source", text=f"source('{s.source}', '{s.table}')", path=model.path, line=s.line)
+                    unresolved[(u.kind, u.path, u.line, u.text)] = u
+            for ref in r.refs:
+                node = self.model_node(ref.name, ref.version)
+                if node:
+                    if node.name.lower() not in seen:
+                        seen.add(node.name.lower())
+                        via.append(node.name)
+                        queue.append(node)
+                elif ref.name.lower() in self.seeds:
+                    seed = self.seeds[ref.name.lower()]
+                    if "seed" in bronze_types:
+                        bronze.setdefault(seed.name, BronzeSource(unique_id=self.unique_id("seed", seed.name), table=seed.name, evidence=f"{model.path}:{ref.line}"))
+                    elif seed.name not in seeds:
+                        seeds.append(seed.name)
+                else:
+                    missing.append(ref.name)
+                    u = Unresolved(kind="missing_ref", text=f"ref('{ref.name}')", path=model.path, line=ref.line)
+                    unresolved[(u.kind, u.path, u.line, u.text)] = u
+        return DbtUpstream(
+            model=start.name, unique_id=self.unique_id("model", start.name), exists=True, route="dbt_model", reader="repo",
+            bronze_tables=sorted(bronze.values(), key=lambda b: b.table), via_models=via, missing_nodes=sorted(set(missing)),
+            seeds=seeds, unresolved=sorted(unresolved.values(), key=lambda u: (u.path, u.line)), evidence=evidence,
+        )
 
     def raw_sql(self, model: DbtModel) -> str:
         return (self.root / model.path).read_text(encoding="utf-8")

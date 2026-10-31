@@ -106,3 +106,50 @@ def test_parse_failure_is_reported_not_raised(tmp_path):
     r = DbtRepo.load(tmp_path)
     out = r.render(r.models["bad"])
     assert not out.parses and out.parse_error and out.rendered_sql.startswith("select a from s.t")
+
+
+# Model lookup and the upstream walk to bronze.
+
+
+def names(hits):
+    return [(m.name, how) for m, how in hits]
+
+
+def test_find_by_name_alias_and_source_table(repo):
+    assert names(repo.find_models("STG_A")) == [("stg_a", "name")]
+    assert names(repo.find_models("stg_c_clean")) == [("stg_c", "alias")]
+    assert names(repo.find_models("stg_versioned")) == [("stg_versioned_v2", "name")]
+    assert names(repo.find_models("raw_a")) == [("cycle_two", "source_table"), ("stg_a", "source_table")]
+    assert names(repo.find_models("raw_c_v2")) == [("stg_c", "source_table")]
+
+
+def test_missing_model_routes_to_data_analysis_without_guessing(repo):
+    assert repo.find_models("stg_aa") == [] and repo.find_models("stg") == []
+    up = repo.upstream("stg_aa", ["source"])
+    assert (up.exists, up.route, up.reader, up.bronze_tables) == (False, "data_analysis", "repo", [])
+
+
+def test_bronze_chain_through_refs(repo):
+    up = repo.upstream("mart_ab", ["source"])
+    assert [b.table for b in up.bronze_tables] == ["legacy.old_x", "raw.raw_a", "raw.raw_b"]
+    assert up.via_models == ["stg_a", "stg_b", "stg_versioned_v2"] and up.unique_id == "model.shop_pkg.mart_ab"
+    assert up.bronze_tables[1].evidence == "models/staging/stg_a.sql:4" and up.bronze_tables[1].unique_id == "source.shop_pkg.shop.raw_a"
+    assert up.evidence == ["models/marts/mart_ab.sql", "models/staging/stg_a.sql", "models/staging/stg_b.sql", "models/staging/stg_versioned_v2.sql"]
+
+
+def test_cycle_guard(repo):
+    up = repo.upstream("cycle_one", ["source"])
+    assert up.via_models == ["cycle_two"] and [b.table for b in up.bronze_tables] == ["raw.raw_a"]
+
+
+def test_missing_ref_and_jinja_reported(repo):
+    broken = repo.upstream("broken", ["source"])
+    assert broken.missing_nodes == ["missing_model"] and [(u.kind, u.line) for u in broken.unresolved] == [("missing_ref", 1)]
+    assert [u.kind for u in repo.upstream("stg_c_clean", ["source"]).unresolved] == ["jinja_expression", "incremental_block"]
+
+
+def test_seeds_as_bronze_on_and_off(repo):
+    off = repo.upstream("from_seed", ["source"])
+    on = repo.upstream("from_seed", ["source", "seed"])
+    assert off.bronze_tables == [] and off.seeds == ["seed_x"]
+    assert [(b.table, b.unique_id) for b in on.bronze_tables] == [("seed_x", "seed.shop_pkg.seed_x")] and on.seeds == []
