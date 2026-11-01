@@ -19,6 +19,7 @@ After = Literal["redo", "reopen", "end"]
 DECISIONS = ("approve", "suggest_changes", "disapprove")
 AFTER = ("redo", "reopen", "end")
 VERSION_STATUS = {"approve": "approved", "suggest_changes": "changes_requested", "disapprove": "disapproved"}
+STAGE_KEYS = {"id", "label", "og_step", "major_gate"}
 
 
 class GateError(ValueError):
@@ -39,6 +40,10 @@ class StageVersion(BaseModel):
 
 class StageState(BaseModel):
     stage: str
+    label: str | None = None
+    og_step: str | None = None
+    major_gate: str | None = None
+    major_gate_number: int | None = None
     status: Literal["not_started", "awaiting_decision", "open", "approved"]
     approved_version: int | None
     versions: list[StageVersion]
@@ -87,6 +92,7 @@ class _Session:
     stages: list[str]
     created_by: str
     created_at: str
+    meta: dict[str, dict[str, Any]] = field(default_factory=dict)
     versions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     approved: dict[str, int] = field(default_factory=dict)
     log: list[dict[str, Any]] = field(default_factory=list)
@@ -111,6 +117,8 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
         raise GateError("session log is corrupt: it does not start with session_started")
     first = events[0]
     s = _Session(first["session_id"], first["flow"], first["scope"], list(first["stages"]), first["user"], first["ts"])
+    # Sessions started before stage metadata existed have no stage_meta; their stages show the id only.
+    s.meta = {m["id"]: m for m in first.get("stage_meta") or []}
     s.versions = {stage: [] for stage in s.stages}
     for e in events[1:]:
         kind = e.get("type")
@@ -133,12 +141,33 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     return s
 
 
+def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
+    """A stage is a plain id, or a mapping with id and optional label, og_step and major_gate. Major gates are numbered in flow order."""
+    out: list[dict[str, Any]] = []
+    for item in items:
+        m = {"id": item} if isinstance(item, str) else dict(item) if isinstance(item, dict) else None
+        if not m or not isinstance(m.get("id"), str) or not m["id"]:
+            raise GateError(f"flow {flow!r}: each stage must be an id or a mapping with an id, got {item!r}")
+        unknown = set(m) - STAGE_KEYS
+        if unknown:
+            raise GateError(f"flow {flow!r}, stage {m['id']!r}: unknown keys {sorted(unknown)}, allowed {sorted(STAGE_KEYS)}")
+        m = {k: str(v) for k, v in m.items() if v is not None}
+        if m.get("major_gate"):
+            m["major_gate_number"] = sum(1 for x in out if x.get("major_gate")) + 1
+        out.append(m)
+    ids = [m["id"] for m in out]
+    if len(set(ids)) != len(ids):
+        raise GateError(f"gates.yaml flows: flow {flow!r} has duplicate stage ids: {ids}")
+    return out
+
+
 class GateStore:
     def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now):
         flows = config.get("flows") or {}
-        if not flows or not all(isinstance(v, list) and v and len(set(v)) == len(v) for v in flows.values()):
-            raise GateError("gates.yaml must define flows, each a non-empty list of unique stage names")
-        self.flows: dict[str, list[str]] = {k: [str(s) for s in v] for k, v in flows.items()}
+        if not flows or not all(isinstance(v, list) and v for v in flows.values()):
+            raise GateError("gates.yaml must define flows, each a non-empty list of stages")
+        self.stage_meta: dict[str, list[dict[str, Any]]] = {k: _parse_stages(k, v) for k, v in flows.items()}
+        self.flows: dict[str, list[str]] = {k: [m["id"] for m in v] for k, v in self.stage_meta.items()}
         self.max_content_bytes = int(config.get("max_content_bytes", 1_000_000))
         self.writer = writer
         self.user = user
@@ -168,7 +197,7 @@ class GateStore:
         if not scope or not scope.strip():
             raise GateError("scope is required, for example the model and tables under review")
         session_id = uuid.uuid4().hex
-        self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow]}, create=True)
+        self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
         return self.view(session_id)
 
     def submit(self, session_id: str, stage: str, content: str) -> StageVersion:
@@ -257,7 +286,8 @@ class GateStore:
                 status = "open"
             else:
                 status = "not_started"
-            stages.append(StageState(stage=stage, status=status, approved_version=s.approved.get(stage), versions=versions))
+            meta = {k: v for k, v in s.meta.get(stage, {}).items() if k != "id"}
+            stages.append(StageState(stage=stage, status=status, approved_version=s.approved.get(stage), versions=versions, **meta))
         if s.ended:
             status, allowed = "ended", []
         elif current is None:

@@ -236,3 +236,44 @@ def test_bad_config_refused(out):
         GateStore(ArtifactWriter(out), {"flows": {"review": ["a", "a"]}}, user="t")
     with pytest.raises(GateError, match="flows"):
         GateStore(ArtifactWriter(out), {}, user="t")
+
+
+# Stage metadata: label, OG step and major gates, kept in the session.
+
+META_FLOW = [
+    {"id": "scope", "label": "Scope"},
+    {"id": "bronze", "label": "Bronze identification", "og_step": 4, "major_gate": "Bronze table list"},
+    "plain",
+    {"id": "gold", "major_gate": "Gold models"},
+]
+
+
+def test_stage_metadata_in_view_and_major_gate_numbers(out):
+    store = GateStore(ArtifactWriter(out), {"flows": {"build": META_FLOW}}, user="t")
+    assert store.flows["build"] == ["scope", "bronze", "plain", "gold"]
+    v = store.start("build", "report R")
+    by = {s.stage: s for s in v.stages}
+    assert (by["bronze"].label, by["bronze"].og_step, by["bronze"].major_gate, by["bronze"].major_gate_number) == ("Bronze identification", "4", "Bronze table list", 1)
+    assert (by["gold"].major_gate_number, by["plain"].label, by["scope"].major_gate) == (2, None, None)
+
+
+def test_session_keeps_the_metadata_it_started_with(out):
+    sid = GateStore(ArtifactWriter(out), {"flows": {"build": META_FLOW}}, user="t").start("build", "r").session_id
+    renamed = [{"id": "scope", "label": "Renamed"}, "bronze", "plain", "gold"]
+    later = GateStore(ArtifactWriter(out), {"flows": {"build": renamed}}, user="t")
+    assert later.view(sid).stages[0].label == "Scope"
+
+
+def test_old_session_without_metadata_replays(gate, out):
+    sid = "a" * 32
+    gate.writer.append_session_event(sid, {"type": "session_started", "flow": "review", "scope": "old", "stages": STAGES, "session_id": sid, "user": "t", "ts": "2026-10-28T00:00:00Z"}, create=True)
+    v = gate.view(sid)
+    assert [s.stage for s in v.stages] == STAGES and all(s.label is None for s in v.stages)
+    approve(gate, sid, "scope")
+    assert gate.view(sid).current_stage == "intake"
+
+
+@pytest.mark.parametrize("flow", [[{"label": "no id"}], [{"id": "a", "colour": "red"}], [42]])
+def test_bad_stage_items_refused(out, flow):
+    with pytest.raises(GateError, match="stage"):
+        GateStore(ArtifactWriter(out), {"flows": {"build": flow}}, user="t")
