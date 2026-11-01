@@ -8,8 +8,8 @@ from dma.config import load_settings
 from dma.server import build_server
 from dma.tools import DmaTools
 
-WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "compile_report", "write_artifact"}
-EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_model_lookup", "dbt_upstream", "dbt_repo_status", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
+WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "grant_permission", "revoke_permission", "compile_report", "write_artifact"}
+EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_model_lookup", "dbt_upstream", "dbt_repo_status", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "sample_rows", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
 @pytest.fixture
@@ -236,3 +236,65 @@ async def test_dbt_upstream_manifest_fallback_and_status(server, dbt_server):
     assert fallback["reader"] == "manifest" and unset["configured"] is False and lookup.is_error and "DMA_DBT_REPO" in lookup.content[0].text
     assert (status["project"], status["models"], status["sources"], status["seeds"]) == ("shop_pkg", 9, 4, 1)
     assert status["this_session_pull"]["status"] == "skipped_off" and status["pull_mode"] == "off"
+
+
+class FakeSampler:
+    def __init__(self):
+        self.calls = []
+
+    def sample(self, table, limit):
+        self.calls.append((table, limit))
+        return [{"id": i} for i in range(50)]
+
+
+async def build_to_extraction(c, bronze=("raw.raw_orders", "raw.raw_customers")):
+    started = (await c.call_tool("start_session", {"flow": "build", "scope": "report R"})).structured_content
+    sid = started["session_id"]
+    for st in [s["stage"] for s in started["stages"]][:5]:
+        args = {"session_id": sid, "stage": st, "content": f"APPROVED {st}"}
+        if st == "bronze_identification":
+            args["bronze_tables"] = list(bronze)
+        v = (await c.call_tool("submit_stage", args)).structured_content["version"]
+        await c.call_tool("record_decision", {"session_id": sid, "stage": st, "version": v, "decision": "approve"})
+    return started, sid
+
+
+@pytest.mark.anyio
+async def test_build_session_shows_major_gates(server):
+    async with Client(server) as c:
+        started, _ = await build_to_extraction(c)
+    assert len(started["stages"]) == 11
+    assert [(s["major_gate_number"], s["major_gate"]) for s in started["stages"] if s["major_gate"]] == [(1, "Bronze table list"), (2, "Silver schemas"), (3, "Gold models")]
+
+
+@pytest.mark.anyio
+async def test_sample_rows_needs_permission_and_is_a_stub(server):
+    async with Client(server) as c:
+        _, sid = await build_to_extraction(c)
+        before = await c.call_tool("sample_rows", {"session_id": sid, "table": "raw.raw_orders"})
+        bad_grant = await c.call_tool("grant_permission", {"session_id": sid, "permission": "data_extraction", "tables": ["raw.raw_payments"]})
+        grant = await c.call_tool("grant_permission", {"session_id": sid, "permission": "data_extraction", "tables": ["raw.raw_orders"]})
+        stub = (await c.call_tool("sample_rows", {"session_id": sid, "table": "raw.raw_orders", "limit": 500})).structured_content
+        other = await c.call_tool("sample_rows", {"session_id": sid, "table": "raw.raw_customers"})
+        await c.call_tool("revoke_permission", {"session_id": sid, "permission": "data_extraction"})
+        after = await c.call_tool("sample_rows", {"session_id": sid, "table": "raw.raw_orders"})
+        view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
+    assert before.is_error and "no logged" in before.content[0].text
+    assert bad_grant.is_error and not grant.is_error
+    assert (stub["status"], stub["limit"], stub["rows"]) == ("not_available", 20, []) and "Phase 0" in stub["reason"]
+    assert other.is_error and after.is_error
+    assert [p["event"] for p in view["permissions"]] == ["granted", "revoked"]
+
+
+@pytest.mark.anyio
+async def test_sample_rows_caps_rows_with_a_connector(tmp_path):
+    settings = load_settings({"DMA_SMX_DIR": str(SMX_DIR), "DMA_OUTPUT_DIR": str(tmp_path / "output"), "DMA_CONFIG_DIR": str(CONFIG_DIR)})
+    sampler = FakeSampler()
+    srv = build_server(DmaTools(settings, pbi_factory=object, sampler=sampler))
+    async with Client(srv) as c:
+        _, sid = await build_to_extraction(c)
+        await c.call_tool("grant_permission", {"session_id": sid, "permission": "data_extraction", "tables": ["RAW.RAW_ORDERS"]})
+        r = (await c.call_tool("sample_rows", {"session_id": sid, "table": "raw.raw_orders", "limit": 99})).structured_content
+    assert sampler.calls == [("raw.raw_orders", 20)] and r["status"] == "ok" and len(r["rows"]) == 20
+    files = [p for p in (tmp_path / "output").rglob("*") if p.is_file()]
+    assert [p.name for p in files] == ["events.jsonl"] and '"rows"' not in files[0].read_text(encoding="utf-8")

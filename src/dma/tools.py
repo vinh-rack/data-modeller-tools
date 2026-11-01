@@ -9,6 +9,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from dma.config import Settings, load_yaml
+from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
 from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
@@ -91,6 +92,15 @@ class DbtRepoStatus(BaseModel):
     problems: list[str] = Field(default_factory=list)
 
 
+class SampleResult(BaseModel):
+    session_id: str
+    table: str
+    limit: int
+    status: Literal["ok", "not_available"]
+    reason: str | None = None
+    rows: list[dict] = Field(default_factory=list, description="Only for the data_extraction stage the modeller sees. Never written to disk.")
+
+
 class SessionList(BaseModel):
     sessions: list[SessionSummary]
 
@@ -105,8 +115,9 @@ def _cell(text: str | None) -> str:
 
 
 class DmaTools:
-    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None):
         self.settings = settings
+        self.sampler = sampler or UnavailableSampler()
         self._pbi_factory = pbi_factory
         self._pbi_client: PowerBIClient | None = None
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
@@ -366,6 +377,44 @@ class DmaTools:
 
     def list_sessions(self) -> SessionList:
         return SessionList(sessions=self.gate.list_sessions())
+
+    def grant_permission(
+        self,
+        session_id: Annotated[str, Field(description="Session id at stage data_extraction.")],
+        permission: Annotated[Literal["data_extraction"], Field(description="Only data_extraction: sampling up to 20 rows per table.")],
+        tables: Annotated[list[str], Field(description="Tables the modeller explicitly agreed to, all from the approved Bronze list.")],
+    ) -> SessionView:
+        try:
+            return self.gate.grant(session_id, permission, tables)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def revoke_permission(
+        self,
+        session_id: Annotated[str, Field(description="Session id.")],
+        permission: Annotated[Literal["data_extraction"], Field(description="The permission to end.")],
+    ) -> SessionView:
+        try:
+            return self.gate.revoke(session_id, permission)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def sample_rows(
+        self,
+        session_id: Annotated[str, Field(description="Session id at stage data_extraction, with a logged permission.")],
+        table: Annotated[str, Field(description="A granted table from the approved Bronze list.")],
+        limit: Annotated[int, Field(description=f"Rows wanted, capped at {MAX_SAMPLE_ROWS}.")] = MAX_SAMPLE_ROWS,
+    ) -> SampleResult:
+        try:
+            name = self.gate.require_sampling(session_id, table)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+        limit = min(max(int(limit), 1), MAX_SAMPLE_ROWS)
+        try:
+            rows = self.sampler.sample(name, limit)[:limit]
+        except SamplingUnavailable as e:
+            return SampleResult(session_id=session_id, table=name, limit=limit, status="not_available", reason=str(e))
+        return SampleResult(session_id=session_id, table=name, limit=limit, status="ok", rows=rows)
 
     def compile_report(self, session_id: Annotated[str, Field(description="Session whose final stage is approved.")]) -> CompiledReport:
         try:
