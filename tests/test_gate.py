@@ -51,7 +51,7 @@ def test_real_config_flows_load(out):
     store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
     assert set(store.flows) == {"review", "build", "lineage"}
     assert store.flows["review"][-1] == "findings"
-    assert len(store.flows["build"]) == 8
+    assert store.flows["build"] == ["scope", "powerbi_intake", "requirements", "legacy_entities", "bronze_identification", "data_extraction", "reuse_check", "silver_staging", "silver_idm", "gold", "rules_pass"]
 
 
 def test_start_refuses_unknown_flow_and_empty_scope(gate):
@@ -277,3 +277,24 @@ def test_old_session_without_metadata_replays(gate, out):
 def test_bad_stage_items_refused(out, flow):
     with pytest.raises(GateError, match="stage"):
         GateStore(ArtifactWriter(out), {"flows": {"build": flow}}, user="t")
+
+
+OLD_BUILD = ["scope", "powerbi_intake", "source_tables", "bronze_identification", "silver_staging", "silver_idm", "gold", "rules_pass"]
+
+
+def test_build_flow_major_gates_from_real_config(out):
+    store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
+    v = store.start("build", "report R")
+    majors = [(s.major_gate_number, s.stage, s.major_gate) for s in v.stages if s.major_gate]
+    assert majors == [(1, "bronze_identification", "Bronze table list"), (2, "silver_idm", "Silver schemas"), (3, "gold", "Gold models")]
+    assert [s.og_step for s in v.stages][:6] == [None, "1", "2", "3", "4", "5.1"]
+
+
+def test_old_eight_stage_build_session_replays_and_completes(out):
+    store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
+    sid = "b" * 32
+    store.writer.append_session_event(sid, {"type": "session_started", "flow": "build", "scope": "old build", "stages": OLD_BUILD, "session_id": sid, "user": "t", "ts": "2026-10-28T00:00:00Z"}, create=True)
+    assert [s.stage for s in store.view(sid).stages] == OLD_BUILD
+    for stage in OLD_BUILD:
+        approve(store, sid, stage)
+    assert store.view(sid).status == "complete" and [o["stage"] for o in store.approved_outputs(sid)] == OLD_BUILD
