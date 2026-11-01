@@ -336,9 +336,10 @@ class DmaTools:
         session_id: Annotated[str, Field(description="Session id from start_session.")],
         stage: Annotated[str, Field(description="The stage being presented. Must be the next stage after the last approved one.")],
         content: Annotated[str, Field(description="The full stage output shown to the modeller: output, evidence and assumptions.")],
+        bronze_tables: Annotated[list[str] | None, Field(description="Only for stage bronze_identification: the Bronze tables this version proposes, e.g. raw.raw_orders. Approving the version locks the list that data extraction may sample.")] = None,
     ) -> StageVersion:
         try:
-            return self.gate.submit(session_id, stage, content)
+            return self.gate.submit(session_id, stage, content, bronze_tables)
         except GateError as e:
             raise ToolError(str(e)) from e
 

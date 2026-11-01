@@ -20,6 +20,8 @@ DECISIONS = ("approve", "suggest_changes", "disapprove")
 AFTER = ("redo", "reopen", "end")
 VERSION_STATUS = {"approve": "approved", "suggest_changes": "changes_requested", "disapprove": "disapproved"}
 STAGE_KEYS = {"id", "label", "og_step", "major_gate"}
+# The stage whose approved version fixes the Bronze tables that data extraction may sample (FR-B11).
+BRONZE_STAGE = "bronze_identification"
 
 
 class GateError(ValueError):
@@ -36,6 +38,7 @@ class StageVersion(BaseModel):
     sha256: str
     submitted_by: str
     submitted_at: str
+    bronze_tables: list[str] | None = None
 
 
 class StageState(BaseModel):
@@ -111,6 +114,13 @@ class _Session:
     def pending(self, stage: str) -> dict[str, Any] | None:
         return next((v for v in self.versions[stage] if v["status"] == "pending"), None)
 
+    @property
+    def approved_bronze(self) -> list[str] | None:
+        """Bronze tables of the approved bronze_identification version, or None when it is not approved or listed none."""
+        if BRONZE_STAGE not in self.approved:
+            return None
+        return self.versions[BRONZE_STAGE][self.approved[BRONZE_STAGE] - 1].get("bronze_tables")
+
 
 def _replay(events: list[dict[str, Any]]) -> _Session:
     if not events or events[0].get("type") != "session_started":
@@ -123,7 +133,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     for e in events[1:]:
         kind = e.get("type")
         if kind == "stage_submitted":
-            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"]})
+            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"], "bronze_tables": e.get("bronze_tables")})
         elif kind == "decision":
             rec = s.versions[e["stage"]][e["version"] - 1]
             rec["status"] = VERSION_STATUS[e["decision"]]
@@ -139,6 +149,21 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
         else:
             raise GateError(f"session log is corrupt: unknown event type {kind!r}")
     return s
+
+
+def _version(v: dict[str, Any]) -> StageVersion:
+    return StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"], bronze_tables=v.get("bronze_tables"))
+
+
+def _check_bronze(stage: str, tables: list[str]) -> list[str]:
+    if stage != BRONZE_STAGE:
+        raise GateError(f"bronze_tables is only accepted for stage {BRONZE_STAGE!r}, got stage {stage!r}")
+    cleaned = [t.strip() for t in tables if isinstance(t, str) and t.strip()]
+    if not cleaned or len(cleaned) != len(tables):
+        raise GateError("bronze_tables must be a non-empty list of table names, e.g. raw.raw_orders")
+    if len({t.lower() for t in cleaned}) != len(cleaned):
+        raise GateError(f"bronze_tables has duplicates: {cleaned}")
+    return cleaned
 
 
 def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
@@ -200,7 +225,7 @@ class GateStore:
         self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
         return self.view(session_id)
 
-    def submit(self, session_id: str, stage: str, content: str) -> StageVersion:
+    def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None) -> StageVersion:
         s = self._load_active(session_id)
         if s.complete:
             raise GateError(f"every stage of session {session_id} is approved. Nothing more can be submitted.")
@@ -215,10 +240,11 @@ class GateStore:
         size = len(content.encode("utf-8"))
         if size > self.max_content_bytes:
             raise GateError(f"content is {size} bytes, the limit is {self.max_content_bytes}")
-        version = len(s.versions[stage]) + 1
-        self._append(session_id, {"type": "stage_submitted", "stage": stage, "version": version, "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()})
-        rec = self._load(session_id).versions[stage][-1]
-        return StageVersion(version=rec["version"], status=rec["status"], sha256=rec["sha256"], submitted_by=rec["user"], submitted_at=rec["ts"])
+        record: dict[str, Any] = {"type": "stage_submitted", "stage": stage, "version": len(s.versions[stage]) + 1, "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+        if bronze_tables is not None:
+            record["bronze_tables"] = _check_bronze(stage, bronze_tables)
+        self._append(session_id, record)
+        return _version(self._load(session_id).versions[stage][-1])
 
     def decide(self, session_id: str, stage: str, version: int, decision: str, note: str | None = None, then: str | None = None, reopen_stage: str | None = None) -> SessionView:
         s = self._load_active(session_id)
@@ -277,7 +303,7 @@ class GateStore:
         current = None if s.ended else s.next_stage
         stages = []
         for stage in s.stages:
-            versions = [StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"]) for v in s.versions[stage]]
+            versions = [_version(v) for v in s.versions[stage]]
             if stage in s.approved:
                 status = "approved"
             elif s.pending(stage):

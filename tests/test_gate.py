@@ -298,3 +298,39 @@ def test_old_eight_stage_build_session_replays_and_completes(out):
     for stage in OLD_BUILD:
         approve(store, sid, stage)
     assert store.view(sid).status == "complete" and [o["stage"] for o in store.approved_outputs(sid)] == OLD_BUILD
+
+
+# The approved Bronze table list on bronze_identification.
+
+
+def bronze_store(out):
+    flow = ["scope", "bronze_identification", "data_extraction", "rest"]
+    return GateStore(ArtifactWriter(out), {"flows": {"build": flow}}, user="t")
+
+
+def test_bronze_tables_recorded_and_locked_by_approval(out):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    approve(store, sid, "scope")
+    v1 = store.submit(sid, "bronze_identification", "list v1", ["raw.raw_orders"])
+    assert v1.bronze_tables == ["raw.raw_orders"] and store._load(sid).approved_bronze is None
+    store.decide(sid, "bronze_identification", 1, "suggest_changes", "add customers")
+    store.submit(sid, "bronze_identification", "list v2", [" raw.raw_orders ", "raw.raw_customers"])
+    store.decide(sid, "bronze_identification", 2, "approve")
+    assert store._load(sid).approved_bronze == ["raw.raw_orders", "raw.raw_customers"]
+    assert store.view(sid).stages[1].versions[0].bronze_tables == ["raw.raw_orders"]
+
+
+@pytest.mark.parametrize("stage,tables,match", [
+    ("scope", ["raw.a"], "only accepted"),
+    ("bronze_identification", [], "non-empty"),
+    ("bronze_identification", ["raw.a", " "], "non-empty"),
+    ("bronze_identification", ["raw.a", "RAW.A"], "duplicates"),
+])
+def test_bronze_tables_refused(out, stage, tables, match):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    if stage == "bronze_identification":
+        approve(store, sid, "scope")
+    with pytest.raises(GateError, match=match):
+        store.submit(sid, stage, "x", tables)
