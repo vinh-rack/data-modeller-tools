@@ -378,12 +378,17 @@ class DmaTools:
             for i, e in enumerate(view.decision_log, 1):
                 then = e.then + (f" {e.reopen_stage}" if e.reopen_stage else "") if e.then else ""
                 md.append(f"| {i} | {e.stage} | {e.version} | {e.decision} | {then} | {_cell(e.note)} | {_cell(e.user)} | {e.ts} |")
+            if view.permissions:
+                md += ["", "## **3. Permission log**", "", "| # | Event | Permission | Tables | User | UTC time |", "|---|---|---|---|---|---|"]
+                for i, p in enumerate(view.permissions, 1):
+                    md.append(f"| {i} | {p.event} | {p.permission} | {_cell(', '.join(p.tables))} | {_cell(p.user)} | {p.ts} |")
             decisions = {
                 "session_id": session_id,
                 "flow": view.flow,
                 "scope": view.scope,
                 "approved_stages": [{"stage": o["stage"], "version": o["version"], "sha256": o["sha256"], "content": o["content"]} for o in outputs],
                 "decision_log": [e.model_dump() for e in view.decision_log],
+                "permission_log": [p.model_dump() for p in view.permissions],
             }
             stem = f"{view.flow}_{session_id[:8]}"
             written = [

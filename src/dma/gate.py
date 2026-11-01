@@ -22,6 +22,9 @@ VERSION_STATUS = {"approve": "approved", "suggest_changes": "changes_requested",
 STAGE_KEYS = {"id", "label", "og_step", "major_gate"}
 # The stage whose approved version fixes the Bronze tables that data extraction may sample (FR-B11).
 BRONZE_STAGE = "bronze_identification"
+# Sampling needs a permission separate from any gate decision, given while the session is at this stage.
+EXTRACTION_STAGE = "data_extraction"
+PERMISSIONS = ("data_extraction",)
 
 
 class GateError(ValueError):
@@ -64,6 +67,14 @@ class LogEntry(BaseModel):
     ts: str
 
 
+class PermissionEntry(BaseModel):
+    event: Literal["granted", "revoked"]
+    permission: str
+    tables: list[str]
+    user: str
+    ts: str
+
+
 class SessionView(BaseModel):
     session_id: str
     flow: str
@@ -75,6 +86,8 @@ class SessionView(BaseModel):
     stages: list[StageState]
     allowed_next: list[str]
     decision_log: list[LogEntry]
+    permissions: list[PermissionEntry] = []
+    granted_tables: list[str] | None = None
     artifacts: list[str]
 
 
@@ -99,6 +112,8 @@ class _Session:
     versions: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     approved: dict[str, int] = field(default_factory=dict)
     log: list[dict[str, Any]] = field(default_factory=list)
+    permission_log: list[dict[str, Any]] = field(default_factory=list)
+    grant: list[str] | None = None
     artifacts: list[str] = field(default_factory=list)
     ended: bool = False
 
@@ -144,6 +159,12 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
             if e.get("then") == "end":
                 s.ended = True
             s.log.append(e)
+        elif kind == "permission_granted":
+            s.grant = list(e["tables"])
+            s.permission_log.append(e)
+        elif kind == "permission_revoked":
+            s.grant = None
+            s.permission_log.append(e)
         elif kind == "artifact_written":
             s.artifacts.append(e["path"])
         else:
@@ -282,6 +303,50 @@ class GateStore:
         self._append(session_id, {"type": "decision", "stage": stage, "version": version, "decision": decision, "note": note, "then": then, "reopen_stage": reopen_stage, "invalidated": invalidated})
         return self.view(session_id)
 
+    def grant(self, session_id: str, permission: str, tables: list[str]) -> SessionView:
+        """Log a permission to sample the given approved Bronze tables. Only while the session is at data_extraction (FR-B11)."""
+        s = self._load_active(session_id)
+        if permission not in PERMISSIONS:
+            raise GateError(f"permission must be one of {list(PERMISSIONS)}, got {permission!r}")
+        if EXTRACTION_STAGE not in s.stages or s.next_stage != EXTRACTION_STAGE:
+            raise GateError(f"{permission} permission can only be granted while the session is at stage {EXTRACTION_STAGE!r}, after major gate 1 ({BRONZE_STAGE}) is approved; the current stage is {s.next_stage!r}")
+        approved = s.approved_bronze
+        if not approved:
+            raise GateError(f"the approved {BRONZE_STAGE} version lists no bronze_tables, so nothing can be granted")
+        by_key = {t.lower(): t for t in approved}
+        wanted = [t.strip() for t in tables or [] if isinstance(t, str) and t.strip()]
+        if not wanted or len({t.lower() for t in wanted}) != len(wanted):
+            raise GateError("tables must be a non-empty list of unique Bronze table names")
+        outside = [t for t in wanted if t.lower() not in by_key]
+        if outside:
+            raise GateError(f"tables not in the approved Bronze list {approved}: {outside}")
+        self._append(session_id, {"type": "permission_granted", "permission": permission, "tables": [by_key[t.lower()] for t in wanted]})
+        return self.view(session_id)
+
+    def revoke(self, session_id: str, permission: str) -> SessionView:
+        s = self._load(session_id)
+        if permission not in PERMISSIONS:
+            raise GateError(f"permission must be one of {list(PERMISSIONS)}, got {permission!r}")
+        if s.grant is None:
+            raise GateError(f"no active {permission} permission to revoke")
+        self._append(session_id, {"type": "permission_revoked", "permission": permission, "tables": s.grant})
+        return self.view(session_id)
+
+    def require_sampling(self, session_id: str, table: str) -> str:
+        """The table's approved name if sampling it is allowed now, else GateError. Never samples anything itself."""
+        s = self._load_active(session_id)
+        if s.next_stage != EXTRACTION_STAGE:
+            raise GateError(f"sampling is only allowed while the session is at stage {EXTRACTION_STAGE!r}; the current stage is {s.next_stage!r}")
+        if s.grant is None:
+            raise GateError("no logged data_extraction permission. Ask the modeller and call grant_permission only on an explicit yes.")
+        key = (table or "").strip().lower()
+        granted = {t.lower(): t for t in s.grant}
+        if key not in granted:
+            raise GateError(f"table {table!r} is not in the granted tables {s.grant}")
+        if key not in {t.lower() for t in s.approved_bronze or []}:
+            raise GateError(f"table {table!r} is not in the currently approved Bronze list")
+        return granted[key]
+
     def require_complete(self, session_id: str) -> _Session:
         s = self._load(session_id)
         if not s.complete:
@@ -329,6 +394,8 @@ class GateStore:
         return SessionView(
             session_id=s.session_id, flow=s.flow, scope=s.scope, status=status, created_by=s.created_by, created_at=s.created_at,
             current_stage=current, stages=stages, allowed_next=allowed, decision_log=log, artifacts=s.artifacts,
+            permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"]) for e in s.permission_log],
+            granted_tables=s.grant,
         )
 
     def list_sessions(self) -> list[SessionSummary]:

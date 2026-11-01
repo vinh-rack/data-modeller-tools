@@ -334,3 +334,69 @@ def test_bronze_tables_refused(out, stage, tables, match):
         approve(store, sid, "scope")
     with pytest.raises(GateError, match=match):
         store.submit(sid, stage, "x", tables)
+
+
+# data_extraction permission: grant, revoke and the sampling check.
+
+
+def at_extraction(out, tables=("raw.raw_orders", "raw.raw_customers")):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    approve(store, sid, "scope")
+    v = store.submit(sid, "bronze_identification", "bronze list", list(tables)).version
+    store.decide(sid, "bronze_identification", v, "approve")
+    return store, sid
+
+
+def test_grant_refused_before_major_gate_1(out):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    with pytest.raises(GateError, match="major gate 1"):
+        store.grant(sid, "data_extraction", ["raw.raw_orders"])
+
+
+@pytest.mark.parametrize("permission,tables,match", [
+    ("profiling", ["raw.raw_orders"], "permission must be"),
+    ("data_extraction", ["raw.raw_payments"], "not in the approved Bronze list"),
+    ("data_extraction", [], "non-empty"),
+])
+def test_grant_refused_for_bad_input(out, permission, tables, match):
+    store, sid = at_extraction(out)
+    with pytest.raises(GateError, match=match):
+        store.grant(sid, permission, tables)
+
+
+def test_grant_sample_check_and_revoke_are_logged(out):
+    store, sid = at_extraction(out)
+    with pytest.raises(GateError, match="no logged"):
+        store.require_sampling(sid, "raw.raw_orders")
+    v = store.grant(sid, "data_extraction", ["RAW.RAW_ORDERS"])
+    assert v.granted_tables == ["raw.raw_orders"]
+    assert store.require_sampling(sid, "raw.raw_orders") == "raw.raw_orders"
+    with pytest.raises(GateError, match="not in the granted"):
+        store.require_sampling(sid, "raw.raw_customers")
+    v = store.revoke(sid, "data_extraction")
+    assert v.granted_tables is None and [(p.event, p.tables) for p in v.permissions] == [("granted", ["raw.raw_orders"]), ("revoked", ["raw.raw_orders"])]
+    with pytest.raises(GateError, match="no logged"):
+        store.require_sampling(sid, "raw.raw_orders")
+    with pytest.raises(GateError, match="no active"):
+        store.revoke(sid, "data_extraction")
+    types = [json.loads(line)["type"] for line in (out / ".sessions" / sid / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert types[-2:] == ["permission_granted", "permission_revoked"]
+
+
+def test_sampling_refused_after_reopen_of_bronze(out):
+    store, sid = at_extraction(out)
+    store.grant(sid, "data_extraction", ["raw.raw_orders"])
+    v = store.submit(sid, "data_extraction", "sampled").version
+    store.decide(sid, "data_extraction", v, "disapprove", "wrong tables", then="reopen", reopen_stage="bronze_identification")
+    with pytest.raises(GateError, match="current stage is 'bronze_identification'"):
+        store.require_sampling(sid, "raw.raw_orders")
+
+
+def test_sampling_refused_after_data_extraction_is_approved(out):
+    store, sid = at_extraction(out)
+    store.grant(sid, "data_extraction", ["raw.raw_orders"])
+    approve(store, sid, "data_extraction")
+    with pytest.raises(GateError, match="only allowed while"):
+        store.require_sampling(sid, "raw.raw_orders")
