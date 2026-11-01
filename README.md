@@ -17,7 +17,7 @@ uv run pytest
 uv run python scripts/smoke_client.py
 ```
 
-The smoke client starts `dma-server` over stdio, lists the 21 tools, runs `run_rules` on the synthetic fixture model, and runs one gated session to final approval in a temp folder. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
+The smoke client starts `dma-server` over stdio, lists the 23 tools, runs `run_rules` on the synthetic fixture model, and runs one gated session to final approval in a temp folder. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
 
 To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls the SMX, knowledge base, lineage and gate tools on the fixtures (the tools that read Power BI need a live token, so they are left out) and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
 
@@ -30,13 +30,15 @@ Copy `.env.example` to `.env` and edit it. `.env` is git-ignored, and the server
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DMA_SMX_DIR` | `tests/fixtures/smx` | Folder with the baseline SMX workbooks. Opened read-only. |
-| `DMA_DBT_MANIFEST` | unset | Path to a dbt `manifest.json` (schema v12), used by `dbt_upstream`. |
+| `DMA_DBT_REPO` | unset | Local clone of the dbt repo, read as code only. See 3.3. |
+| `DMA_DBT_PULL` | `auto` | `auto` runs `git pull --ff-only` in `DMA_DBT_REPO` at most once a day; `off` never pulls. |
+| `DMA_DBT_MANIFEST` | unset | Fallback only: a dbt `manifest.json` (schema v12) for `dbt_upstream` when `DMA_DBT_REPO` is not set. |
 | `DMA_OUTPUT_DIR` | `output` | The only folder the server writes to: artifacts, plus gate logs in `.sessions/`. It must not be inside `DMA_SMX_DIR`. |
 | `DMA_CONFIG_DIR` | `config` | Folder holding `smx_mapping.yaml`, `rules.yaml` and `gates.yaml`. |
 | `DMA_KB_DIR` | `kb` | Knowledge base folder: glossary, conventions and `report_map.yaml`. The repo copy holds templates only, so point this at a git-ignored folder (for example `samples/kb`) for client files. |
 | `DMA_USER` | OS user | Name recorded on every gate decision. It is an audit label, not authentication. |
 | `DMA_TRANSPORT` | `stdio` | Only `stdio` is enabled in v1. |
-| `PBI_ACCESS_TOKEN` | empty | Power BI bearer token, with or without the `Bearer ` prefix. See 3.4. Never commit it. |
+| `PBI_ACCESS_TOKEN` | empty | Power BI bearer token, with or without the `Bearer ` prefix. See 3.5. Never commit it. |
 | `PBI_API_BASE` | `https://api.powerbi.com/v1.0/myorg` | Power BI REST base URL. Must be https. |
 | `PBI_MAX_ROWS` | `5000` | Row cap for metadata DAX queries. |
 | `PBI_REPORT_ID`, `PBI_DATASET_ID`, `PBI_WORKSPACE_ID` | empty | Used only by `scripts/pbi_probe.py`. Leave the workspace empty for My workspace. |
@@ -87,7 +89,9 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `find_tables_by_bronze` | no | Finds tables that source from a bronze table, including transitively |
 | `find_tables_by_grain` | no | Finds tables with the same grain (PK column set) |
 | `run_rules` | no | Runs the deterministic rules and returns findings |
-| `dbt_upstream` | no | Lists the bronze sources of a dbt model from the manifest |
+| `dbt_model_lookup` | no | Says whether a dbt model exists by file name, alias or source table, with its raw and rendered SQL, refs, sources and unresolved Jinja |
+| `dbt_upstream` | no | Lists the bronze tables of a dbt model by following `ref()` and `source()` in the clone, with `file:line` evidence |
+| `dbt_repo_status` | no | Shows the clone path, the pull result, the commit and the model, source and seed counts |
 | `sql_column_lineage` | no | Traces a SQL output column to its source columns (SQLGlot) |
 | `lineage_diagram` | no | Builds table-level lineage from the SMX index, upstream, downstream or both, with a Mermaid flowchart |
 | `report_lineage` | no | Traces each Power BI table of a report through its Gold table to Bronze, or marks it unknown with the reason |
@@ -129,7 +133,26 @@ RULE-10 (load behaviour documented) is not built: the SMX layouts have no SCD or
 
 `lineage_diagram` and `report_lineage` build the Mermaid text in code. Nodes are confirmed when the table is in the SMX index and inferred when it is only named in a source cell. An unqualified source name is matched only in its own layer, because names like `vehicle_master` exist in several layers.
 
-### *3.3. Step gate*
+### *3.3. dbt repository*
+
+dbt is reference code only (REQUIREMENTS D3). The server never runs a dbt command and never renders Jinja, so there is no `manifest.json`. Clone the repo once yourself, outside this repo, and point `DMA_DBT_REPO` at it. For Phase 0:
+
+```bash
+git clone https://github.com/dbt-labs/jaffle-shop.git ../jaffle-shop
+```
+
+Then set `DMA_DBT_REPO=../jaffle-shop` in `.env`. On the first dbt tool call of a session, the server runs `git pull --ff-only` in the clone if the last pull is older than 24 hours, and records each attempt in `output/.dbt/pulls.jsonl`. A dirty or diverged clone, missing git or no network is reported by `dbt_repo_status` and the current files are used; the server never stashes, resets or re-clones.
+
+How the reader works:
+
+- It reads `dbt_project.yml` and the model-path YAML with `yaml.safe_load`, and every model `.sql`, source and seed as files. Sources use dbt's defaults: the schema is the source name and the identifier is the table name unless set.
+- It finds `ref('m')`, `ref('pkg', 'm')`, `ref('m', v=2)` and `source('s', 't')` in the raw SQL. Only literal arguments are read.
+- For SQLGlot it replaces refs with the model alias or name, and sources with `schema.identifier`. It drops comments, `config()` and `{% if is_incremental() %}` bodies, strips other `{% %}` tags, and replaces any other `{{ }}` (macros, `var()`, `this`) with a numbered placeholder. Every one of these is listed under `unresolved` with its file and line.
+- A name with no exact match returns `exists: false` and route `data_analysis` (FR-B9). There is no fuzzy matching.
+
+Limits: refs are not schema-qualified, because the schema depends on the target and the project's `generate_schema_name`. `+alias` in `dbt_project.yml` and installed packages (`dbt_packages/`) are not read. Seeds count as bronze only when `config/dbt.yaml` lists `seed` in `bronze_resource_types`.
+
+### *3.4. Step gate*
 
 The stage lists for each flow live in `config/gates.yaml`. A session keeps the list it started with.
 
@@ -139,7 +162,7 @@ The stage lists for each flow live in `config/gates.yaml`. A session keeps the l
 - Every event goes to `output/.sessions/<session_id>/events.jsonl`, append-only, with the user and a UTC timestamp. State is rebuilt from that file, so sessions survive a server restart. Use `list_sessions` and `get_session` to resume.
 - The server cannot see the modeller. The skills tell the IDE model to pass only the modeller's explicit word, and the server refuses anything other than the three decision values.
 
-### *3.4. Power BI*
+### *3.5. Power BI*
 
 The client is read-only by construction. Every request is checked against an allowlist before it is sent: GET on report, dataset and datasource metadata, and POST only to the two DAX query endpoints. DAX must be a plain `EVALUATE` query, and results are capped at `PBI_MAX_ROWS`. With no workspace ID the My workspace paths are used, and with one the `groups/{id}/` paths.
 
