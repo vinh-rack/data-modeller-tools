@@ -3,7 +3,7 @@ import json
 import pytest
 
 from conftest import CONFIG_DIR
-from dma.config import load_yaml
+from dma.config import load_gates
 from dma.gate import GateError, GateStore
 from dma.writer import ArtifactWriter
 
@@ -13,6 +13,11 @@ STAGES = ["scope", "intake", "findings"]
 @pytest.fixture
 def out(tmp_path):
     return tmp_path / "output"
+
+
+def real_store(out):
+    gates, templates = load_gates(CONFIG_DIR)
+    return GateStore(ArtifactWriter(out), gates, user="t", templates=templates)
 
 
 def make_store(out, user="tester"):
@@ -48,7 +53,7 @@ def test_start_returns_stages_and_first_step(gate, sid):
 
 
 def test_real_config_flows_load(out):
-    store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
+    store = real_store(out)
     assert set(store.flows) == {"review", "build", "lineage"}
     assert store.flows["review"][-1] == "findings"
     assert store.flows["build"] == ["scope", "powerbi_intake", "requirements", "legacy_entities", "bronze_identification", "data_extraction", "reuse_check", "silver_staging", "silver_idm", "gold", "rules_pass"]
@@ -283,7 +288,7 @@ OLD_BUILD = ["scope", "powerbi_intake", "source_tables", "bronze_identification"
 
 
 def test_build_flow_major_gates_from_real_config(out):
-    store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
+    store = real_store(out)
     v = store.start("build", "report R")
     majors = [(s.major_gate_number, s.stage, s.major_gate) for s in v.stages if s.major_gate]
     assert majors == [(1, "bronze_identification", "Bronze table list"), (2, "silver_idm", "Silver schemas"), (3, "gold", "Gold models")]
@@ -291,7 +296,7 @@ def test_build_flow_major_gates_from_real_config(out):
 
 
 def test_old_eight_stage_build_session_replays_and_completes(out):
-    store = GateStore(ArtifactWriter(out), load_yaml(CONFIG_DIR, "gates.yaml"), user="t")
+    store = real_store(out)
     sid = "b" * 32
     store.writer.append_session_event(sid, {"type": "session_started", "flow": "build", "scope": "old build", "stages": OLD_BUILD, "session_id": sid, "user": "t", "ts": "2026-10-28T00:00:00Z"}, create=True)
     assert [s.stage for s in store.view(sid).stages] == OLD_BUILD
@@ -400,3 +405,12 @@ def test_sampling_refused_after_data_extraction_is_approved(out):
     approve(store, sid, "data_extraction")
     with pytest.raises(GateError, match="only allowed while"):
         store.require_sampling(sid, "raw.raw_orders")
+
+
+def test_template_headings_kept_in_session_and_unknown_template_refused(out):
+    store = real_store(out)
+    v = store.start("build", "r")
+    req = next(s for s in v.stages if s.stage == "requirements")
+    assert req.template == "requirements_doc.yaml" and req.headings[0] == "Report purpose" and "Open questions" in req.headings
+    with pytest.raises(GateError, match="not loaded"):
+        GateStore(ArtifactWriter(out), {"flows": {"build": [{"id": "requirements", "template": "nope.yaml"}]}}, user="t")

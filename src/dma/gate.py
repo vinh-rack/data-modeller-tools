@@ -19,7 +19,9 @@ After = Literal["redo", "reopen", "end"]
 DECISIONS = ("approve", "suggest_changes", "disapprove")
 AFTER = ("redo", "reopen", "end")
 VERSION_STATUS = {"approve": "approved", "suggest_changes": "changes_requested", "disapprove": "disapproved"}
-STAGE_KEYS = {"id", "label", "og_step", "major_gate"}
+STAGE_KEYS = {"id", "label", "og_step", "major_gate", "template"}
+# The stage whose approved version becomes the requirement document (FR-B10).
+REQUIREMENTS_STAGE = "requirements"
 # The stage whose approved version fixes the Bronze tables that data extraction may sample (FR-B11).
 BRONZE_STAGE = "bronze_identification"
 # Sampling needs a permission separate from any gate decision, given while the session is at this stage.
@@ -50,6 +52,8 @@ class StageState(BaseModel):
     og_step: str | None = None
     major_gate: str | None = None
     major_gate_number: int | None = None
+    template: str | None = None
+    headings: list[str] | None = None
     status: Literal["not_started", "awaiting_decision", "open", "approved"]
     approved_version: int | None
     versions: list[StageVersion]
@@ -208,12 +212,19 @@ def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
 
 
 class GateStore:
-    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now):
+    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None):
         flows = config.get("flows") or {}
         if not flows or not all(isinstance(v, list) and v for v in flows.values()):
             raise GateError("gates.yaml must define flows, each a non-empty list of stages")
         self.stage_meta: dict[str, list[dict[str, Any]]] = {k: _parse_stages(k, v) for k, v in flows.items()}
         self.flows: dict[str, list[str]] = {k: [m["id"] for m in v] for k, v in self.stage_meta.items()}
+        # Template headings are copied into the stage metadata, so a session keeps the headings it started with.
+        for metas in self.stage_meta.values():
+            for m in metas:
+                if "template" in m:
+                    if m["template"] not in (templates or {}):
+                        raise GateError(f"stage {m['id']!r} names template {m['template']!r}, which was not loaded")
+                    m["headings"] = [str(h) for h in templates[m["template"]].get("headings") or []]
         self.max_content_bytes = int(config.get("max_content_bytes", 1_000_000))
         self.writer = writer
         self.user = user

@@ -7,11 +7,12 @@ flows:
   # REQUIREMENTS FR-R6, stages 1 to 6. Stage 7 (artifacts) runs after the last gate.
   review: [scope, intake, structural_review, semantic_review, hard_rule_checklist, findings]
   # ARCHITECTURE section 4 and REQUIREMENTS D5: the original 14-step flow (2 Nov) as 11 stages, each gated.
-  # A stage is a plain id or a mapping with id, label, og_step (the original flow's step numbers) and major_gate (its three named gates).
+  # A stage is a plain id or a mapping with id, label, og_step (the original flow's step numbers), major_gate (its three named gates)
+  # and template (a YAML file in the config folder whose headings the stage output follows).
   build:
     - {id: scope, label: Scope}
     - {id: powerbi_intake, label: Power BI intake, og_step: "1"}
-    - {id: requirements, label: Requirements, og_step: "2"}
+    - {id: requirements, label: Requirements, og_step: "2", template: requirements_doc.yaml}
     - {id: legacy_entities, label: Legacy entities, og_step: "3"}
     - {id: bronze_identification, label: Bronze identification, og_step: "4", major_gate: Bronze table list}
     - {id: data_extraction, label: Data extraction, og_step: "5.1"}

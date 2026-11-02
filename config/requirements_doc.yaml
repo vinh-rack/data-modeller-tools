@@ -1,0 +1,13 @@
+# Requirement document template (REQUIREMENTS FR-B10). The content and any official template are still open (Q12),
+# so the headings live here and can change without code changes. The build skill drafts the requirements stage with
+# these headings, from the approved Power BI intake only, and tags every statement confirmed, inferred, assumed or unknown.
+title: Report requirements
+headings:
+  - Report purpose
+  - Pages and visuals
+  - Measures
+  - Tables and columns used
+  - Filters and parameters
+  - Data types
+  - Source systems and source tables
+  - Open questions

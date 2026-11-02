@@ -8,10 +8,10 @@ from typing import Annotated, Callable, Literal
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
-from dma.config import Settings, load_yaml
+from dma.config import Settings, load_gates, load_yaml
 from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
-from dma.gate import After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
+from dma.gate import REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.diagram import Direction, LineageGraph, ReportLineage, report_lineage, table_lineage
@@ -127,7 +127,8 @@ class DmaTools:
         self._dbt_pull: PullResult | None = None
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
-            self.gate = GateStore(self.writer, load_yaml(settings.config_dir, "gates.yaml"), user=settings.user)
+            gates, templates = load_gates(settings.config_dir)
+            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates)
         except GateError as e:
             raise ToolError(str(e)) from e
 
@@ -450,16 +451,43 @@ class DmaTools:
         except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
 
+    def _requirements_doc(self, session_id: str) -> tuple[str, list[str]]:
+        """The approved requirements version under a header. Missing template headings are reported, never filled in."""
+        outputs = {o["stage"]: o for o in self.gate.approved_outputs(session_id)}
+        if REQUIREMENTS_STAGE not in outputs:
+            raise ToolError(f"session {session_id} has no {REQUIREMENTS_STAGE!r} stage, so there is no requirement document to write")
+        view = self.gate.view(session_id)
+        stage = next(s for s in view.stages if s.stage == REQUIREMENTS_STAGE)
+        o = outputs[REQUIREMENTS_STAGE]
+        approval = next((e for e in reversed(view.decision_log) if e.stage == REQUIREMENTS_STAGE and e.version == o["version"] and e.decision == "approve"), None)
+        header = [
+            "# Report requirements", "",
+            f"- Scope: {_cell(view.scope)}",
+            f"- Session: `{session_id}`, stage `{REQUIREMENTS_STAGE}` version {o['version']} (sha256 `{o['sha256'][:12]}`)",
+            f"- Approved by {approval.user if approval else 'unknown'} at {approval.ts if approval else 'unknown'}",
+            "", "---", "",
+        ]
+        body = o["content"].rstrip()
+        missing = [h for h in stage.headings or [] if h.lower() not in body.lower()]
+        notes = [f"template headings not found in the approved requirements: {', '.join(missing)}"] if missing else []
+        return "\n".join(header) + body + "\n", notes
+
     def write_artifact(
         self,
-        kind: Annotated[ArtifactKind, Field(description="findings_md, decisions_json, proposed_smx_xlsx (JSON {sheet: [rows]}) or lineage_mermaid.")],
+        kind: Annotated[ArtifactKind, Field(description="findings_md, decisions_json, proposed_smx_xlsx (JSON {sheet: [rows]}), lineage_mermaid, or requirements_md (built by the server from the approved requirements stage; pass empty content).")],
         name: Annotated[str, Field(description="File name stem, letters, digits, '_', '-', '.' only. A timestamp prefix and extension are added.")],
-        content: Annotated[str, Field(description="File content. JSON text for decisions_json and proposed_smx_xlsx. Use only approved stage outputs.")],
+        content: Annotated[str, Field(description="File content. JSON text for decisions_json and proposed_smx_xlsx. Use only approved stage outputs. Empty for requirements_md.")],
         session_id: Annotated[str, Field(description="Session whose final stage is approved. Writing is refused before that.")],
     ) -> WrittenArtifact:
         try:
             self.gate.require_complete(session_id)
+            notes: list[str] = []
+            if kind == "requirements_md":
+                if content.strip():
+                    raise ToolError("requirements_md is built by the server from the approved requirements stage. Pass empty content.")
+                content, notes = self._requirements_doc(session_id)
             written = self.writer.write(kind, name, content)
+            written.notes = notes
             self.gate.record_artifact(session_id, written.path)
             return written
         except (GateError, WriterError) as e:

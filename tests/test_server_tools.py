@@ -298,3 +298,46 @@ async def test_sample_rows_caps_rows_with_a_connector(tmp_path):
     assert sampler.calls == [("raw.raw_orders", 20)] and r["status"] == "ok" and len(r["rows"]) == 20
     files = [p for p in (tmp_path / "output").rglob("*") if p.is_file()]
     assert [p.name for p in files] == ["events.jsonl"] and '"rows"' not in files[0].read_text(encoding="utf-8")
+
+
+REQUIREMENTS_TEXT = "## Report purpose\n[confirmed] Order overview.\n## Measures\n[unknown] DAX not readable."
+
+
+async def finish_build(c, sid, requirements=REQUIREMENTS_TEXT):
+    view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
+    for st in view["stages"]:
+        if st["status"] == "approved":
+            continue
+        content = requirements if st["stage"] == "requirements" else f"APPROVED {st['stage']}"
+        v = (await c.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": content})).structured_content["version"]
+        await c.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v, "decision": "approve"})
+
+
+@pytest.mark.anyio
+async def test_requirements_md_from_approved_version_only(server, tmp_path):
+    async with Client(server) as c:
+        started = (await c.call_tool("start_session", {"flow": "build", "scope": "report R"})).structured_content
+        sid = started["session_id"]
+        early = await c.call_tool("write_artifact", {"kind": "requirements_md", "name": "req", "content": "", "session_id": sid})
+        for st in ("scope", "powerbi_intake"):
+            v = (await c.call_tool("submit_stage", {"session_id": sid, "stage": st, "content": st})).structured_content["version"]
+            await c.call_tool("record_decision", {"session_id": sid, "stage": st, "version": v, "decision": "approve"})
+        await c.call_tool("submit_stage", {"session_id": sid, "stage": "requirements", "content": "DRAFT purpose guessed"})
+        await c.call_tool("record_decision", {"session_id": sid, "stage": "requirements", "version": 1, "decision": "suggest_changes", "note": "no guessing"})
+        await finish_build(c, sid)
+        with_content = await c.call_tool("write_artifact", {"kind": "requirements_md", "name": "req", "content": "made up", "session_id": sid})
+        ok = (await c.call_tool("write_artifact", {"kind": "requirements_md", "name": "req", "content": "", "session_id": sid})).structured_content
+    assert early.is_error and "blocked" in early.content[0].text
+    assert with_content.is_error and "empty content" in with_content.content[0].text
+    text = open(ok["path"], encoding="utf-8").read()
+    assert REQUIREMENTS_TEXT in text and "DRAFT" not in text and "version 2" in text
+    assert started["stages"][2]["headings"][0] == "Report purpose"
+    assert "Pages and visuals" in ok["notes"][0] and "Report purpose" not in ok["notes"][0]
+
+
+@pytest.mark.anyio
+async def test_requirements_md_needs_a_requirements_stage(server):
+    async with Client(server) as c:
+        sid = await approved_session(c, "lineage")
+        r = await c.call_tool("write_artifact", {"kind": "requirements_md", "name": "req", "content": "", "session_id": sid})
+    assert r.is_error and "no 'requirements' stage" in r.content[0].text

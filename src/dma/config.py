@@ -50,6 +50,13 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     )
 
 
+def load_gates(config_dir: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """gates.yaml plus every template file its stages name, loaded from the same config folder."""
+    gates = load_yaml(config_dir, "gates.yaml")
+    names = {s["template"] for flow in (gates.get("flows") or {}).values() for s in flow if isinstance(s, dict) and s.get("template")}
+    return gates, {n: load_yaml(config_dir, n) for n in sorted(names)}
+
+
 def load_yaml(config_dir: Path, name: str) -> dict[str, Any]:
     path = config_dir / name
     if not path.is_file():

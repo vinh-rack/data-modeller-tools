@@ -10,12 +10,13 @@ from typing import Callable, Literal
 import openpyxl
 from pydantic import BaseModel
 
-ArtifactKind = Literal["findings_md", "decisions_json", "proposed_smx_xlsx", "lineage_mermaid"]
+ArtifactKind = Literal["findings_md", "decisions_json", "proposed_smx_xlsx", "lineage_mermaid", "requirements_md"]
 EXTENSIONS: dict[str, str] = {
     "findings_md": ".md",
     "decisions_json": ".json",
     "proposed_smx_xlsx": ".xlsx",
     "lineage_mermaid": ".mmd",
+    "requirements_md": ".md",
 }
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 MAX_BYTES = 5 * 1024 * 1024
@@ -37,6 +38,7 @@ class WrittenArtifact(BaseModel):
     kind: str
     path: str
     bytes: int
+    notes: list[str] = []
 
 
 def _utc_stamp() -> str:
