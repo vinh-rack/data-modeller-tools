@@ -107,6 +107,13 @@ def build_eip_family():
         ("gold_fleet", "vw_booking_recent", "BookingDate", 1, None, "gold", "gold_fleet.f_booking", "booking_date", "date", "1:1 mapping"),
     ])
 
+    # Lookup and Report Table Mapping complete the wave3 sheet set; the reader ignores both.
+    _sheet(wb, "Lookup", ["Schema Name", "Table Name", "Column Name", "SET", "PK", "Rule Related Comments"], [
+        ("gold_fleet", "lkp_booking_status", "booking_status_cd", 1, "Y", "synthetic static list"),
+    ])
+    _sheet(wb, "Report Table Mapping", ["PBI Report", "Odata Tables (Existing Redshift table)", "Tables", "Status", "SMX", "Reviewed Date", "Comments", "PBI Table"], [
+        ("Synthetic Fleet Bookings", "fleet.booking_v", "gold_fleet.f_booking", None, "synthetic_fleet_eip", None, "synthetic", "Booking"),
+    ])
     _sheet(wb, "Review Comments", ["#", "Gold Table", "Review Comments / Action Required"], [
         (1, "f_booking", "synthetic comment, sheet must be ignored by the reader"),
     ])

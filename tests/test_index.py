@@ -111,3 +111,15 @@ def test_reads_the_cdm_v1_layout(mapping, rules_cfg):
     assert [s.qualified for s in by["slvr_cdm.address"].sources] == ["slvr_stg.address"]
     assert [s.qualified for s in by["gold_party.d_address"].sources] == ["slvr_cdm.address"]
     assert idx.bronze_sources(by["gold_party.d_address"]) == ["address"]
+
+
+WAVE3_SHEETS = ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
+
+
+def test_fleet_fixture_is_a_wave3_workbook(index):
+    wb = openpyxl.load_workbook(SMX_DIR / "synthetic_fleet_eip.xlsx", read_only=True, data_only=True)
+    assert wb.sheetnames[:6] == WAVE3_SHEETS
+    wb.close()
+    info = index.models["synthetic_fleet_eip"]
+    assert sorted(info.sheets) == ["Bronze", "GOLD - SDM", "Silver - IDM", "Silver - Staging"]
+    assert not any(t.name == "lkp_booking_status" for t in index.tables)
