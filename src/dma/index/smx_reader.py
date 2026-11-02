@@ -162,7 +162,7 @@ class SmxReader:
                 rules=rules or None,
                 row=excel_row,
             ))
-            self._add_sources(table, cell(row, "source_table"), cell(row, "source_system"))
+            self._add_sources(table, cell(row, "source_table"), cell(row, "source_system"), cell(row, "source_schema"))
 
         return list(tables.values())
 
@@ -170,10 +170,12 @@ class SmxReader:
         text = " ".join(t for t in (cell(row, "rules"), cell(row, "rules_comments"), cell(row, "description")) if t)
         if text:
             table.rules_text = f"{table.rules_text}\n{text}".strip()
-        self._add_sources(table, cell(row, "source_table"), cell(row, "source_system"))
+        self._add_sources(table, cell(row, "source_table"), cell(row, "source_system"), cell(row, "source_schema"))
 
-    def _add_sources(self, table: Table, source_cell: str, system: str) -> None:
+    def _add_sources(self, table: Table, source_cell: str, system: str, schema: str = "") -> None:
         for ref in parse_sources(source_cell, system or None, self._empty):
+            if ref.schema_name is None and schema and _IDENT.match(schema.lower()):
+                ref = SourceRef(schema_name=schema.lower(), table=ref.table, source_system=ref.source_system)
             if all(ref.qualified.lower() != s.qualified.lower() for s in table.sources):
                 table.sources.append(ref)
 

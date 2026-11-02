@@ -1,7 +1,9 @@
 # SMX workbook to internal field mapping.
 #
 # PLACEHOLDER: built from header names observed in two existing layout families
-# (EIP_SMX_* workbooks and the canonical A2 layout in Formatting_and_Naming_Conventions.md).
+# (EIP_SMX_* workbooks, the canonical A2 layout in Formatting_and_Naming_Conventions.md, and the older
+# CDM v1.0 layout with DocInfo, Bronze - Landing and Lookups sheets). New builds are written in the wave3
+# layout of config/smx_template.yaml; this file only says how existing workbooks are read.
 # It is not the official SMX template. Replace or extend it once the template is confirmed.
 #
 # Matching is case-insensitive, trims whitespace and collapses repeated spaces.
@@ -11,9 +13,9 @@ header_scan_rows: 15
 
 layers:
   bronze:
-    sheets: ["bronze"]
+    sheets: ["bronze", "bronze - landing"]
   silver_staging:
-    sheets: ["silver - staging", "silver stage", "silver staging"]
+    sheets: ["silver - staging", "silver- staging", "silver stage", "silver staging"]
   silver_idm:
     sheets: ["silver - idm", "silver idm"]
   gold:
@@ -26,7 +28,9 @@ fields:
   column: ["column name", "target column name"]
   data_type: ["data type"]
   source_system: ["source system"]
-  source_table: ["source table", "source table name", "source table / file", "table / file"]
+  source_table: ["source table", "source table name", "source table / file", "table / file", "source table name/file name"]
+  # CDM v1.0 keeps the source schema in its own column; it qualifies an unqualified source table.
+  source_schema: ["source schema name"]
   source_column: ["source column", "source column name", "column"]
   is_pk: ["pk", "is pk"]
   is_fk: ["is fk", "fk"]

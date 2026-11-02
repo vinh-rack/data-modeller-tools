@@ -22,11 +22,12 @@ def _sheet(wb, title, header, rows, preamble=None):
         ws.append(list(r))
 
 
-def _save(wb, name):
+def _save(wb, name, out=None):
     wb.properties.created = FIXED_TS
     wb.properties.modified = FIXED_TS
-    OUT.mkdir(parents=True, exist_ok=True)
-    wb.save(OUT / name)
+    out = out or OUT
+    out.mkdir(parents=True, exist_ok=True)
+    wb.save(out / name)
 
 
 def build_eip_family():
@@ -145,7 +146,36 @@ def build_canonical_family():
     _save(wb, "synthetic_logistics_canonical.xlsx")
 
 
+def build_cdm_v1_family():
+    """Older CDM v1.0 layout: DocInfo, Bronze - Landing, Lookups, Silver- Staging with marker rows, separate source schema column.
+    Kept in its own folder so the default index stays at two models. The reader must still read it; the writer never writes it."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    _sheet(wb, "DocInfo", ["Document Information"], [("Model", "synthetic address"), ("Version", "1.0")])
+    _sheet(wb, "Bronze - Landing", ["Target Table Name", "Source System", "Source Table Name/File Name", "Join/Rule/Filter Applied"], [
+        ("address", "crm", "address_extract", "1:1 load"),
+    ])
+    _sheet(wb, "Lookups", ["Subject Area", "Schema Name", "Table_Name", "Column Name", "SET", "Rules", "Rule Related Comments"], [
+        ("party", "slvr_cdm", "address_type", "address_type_cd", 1, "static list", "synthetic, sheet must be ignored by the reader"),
+    ])
+    _sheet(wb, "Silver- Staging", ["Target Column Name", "Description", "Data Type", "SET NO.", "Source Table Name", "Source Column Name", "Join/Rule/Filter Applied"], [
+        ("slvr_stg.address", None, None, 1, "address", None, "from bronze address"),
+        ("address_num", "Address number", "string", 1, "address", "addr_no", "pk"),
+        ("city_nm", "City", "string", 1, "address", "city", "1:1 mapping"),
+    ])
+    _sheet(wb, "Silver - IDM", ["Subject Area", "Schema Name", "Table_Name", "Column Name", "SET NO.", "Source Schema Name", "Table / File", "Column", "PK", "SCD2", "MC", "MnC", "Rules", "Rule Related Comments"], [
+        ("party", "slvr_cdm", "address", "address_id", 1, "slvr_stg", "address", "address_num", "Y", None, None, None, "hash(address_num)", None),
+        ("party", "slvr_cdm", "address", "city_nm", 1, "slvr_stg", "address", "city_nm", None, "Y", None, None, "1:1 mapping", None),
+    ])
+    _sheet(wb, "Gold - SDM", ["Schema Name", "Table_Name", "Column Name", "SET NO.", "Source Schema Name", "Table / File", "Column", "Rules"], [
+        ("gold_party", "d_address", "address_id", 1, "slvr_cdm", "address", "address_id", "1:1 mapping"),
+        ("gold_party", "d_address", "city_nm", 1, "slvr_cdm", "address", "city_nm", "1:1 mapping"),
+    ])
+    _save(wb, "synthetic_cdm_v1.xlsx", OUT.parent / "smx_cdm_v1")
+
+
 if __name__ == "__main__":
     build_eip_family()
     build_canonical_family()
+    build_cdm_v1_family()
     print("wrote", sorted(p.name for p in OUT.glob("*.xlsx")))

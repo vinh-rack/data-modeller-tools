@@ -3,7 +3,7 @@ import hashlib
 import openpyxl
 import pytest
 
-from conftest import SMX_DIR
+from conftest import FIXTURES, SMX_DIR
 from dma.index.model_index import ModelIndex
 from dma.index.smx_reader import SmxLayoutError, SmxReader, parse_sources
 from dma.models import Layer
@@ -99,3 +99,15 @@ def test_reading_never_modifies_workbooks(mapping, rules_cfg):
     ModelIndex.build(SMX_DIR, mapping, rules_cfg, strict=True)
     after = {p: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns) for p in SMX_DIR.glob("*.xlsx")}
     assert before == after
+
+
+def test_reads_the_cdm_v1_layout(mapping, rules_cfg):
+    idx = ModelIndex.build(FIXTURES / "smx_cdm_v1", mapping, rules_cfg, strict=True)
+    info = idx.models["synthetic_cdm_v1"]
+    assert sorted(info.sheets) == ["Bronze - Landing", "Gold - SDM", "Silver - IDM", "Silver- Staging"]
+    by = {t.qualified: t for t in idx.tables}
+    assert sorted((t.layer.value, t.qualified) for t in idx.tables) == [("bronze", "address"), ("gold", "gold_party.d_address"), ("silver_idm", "slvr_cdm.address"), ("silver_staging", "slvr_stg.address")]
+    assert [c.name for c in by["slvr_stg.address"].columns if c.is_pk] == ["address_num"]
+    assert [s.qualified for s in by["slvr_cdm.address"].sources] == ["slvr_stg.address"]
+    assert [s.qualified for s in by["gold_party.d_address"].sources] == ["slvr_cdm.address"]
+    assert idx.bronze_sources(by["gold_party.d_address"]) == ["address"]

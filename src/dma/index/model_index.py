@@ -100,7 +100,12 @@ class ModelIndex:
                     found.add(src.qualified.lower())
                 continue
             for parent in self.resolve(src.qualified):
-                if parent is not table:
+                if parent is table:
+                    continue
+                # A source with no known layer (an unqualified name, no source system) can still resolve to an indexed Bronze table.
+                if parent.layer is Layer.BRONZE:
+                    found.add(parent.qualified.lower())
+                else:
                     found.update(self.bronze_sources(parent, _depth + 1))
         return sorted(found)
 
