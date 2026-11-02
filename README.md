@@ -17,7 +17,7 @@ uv run pytest
 uv run python scripts/smoke_client.py
 ```
 
-The smoke client starts `dma-server` over stdio, lists the 23 tools, runs `run_rules` on the synthetic fixture model, and runs one gated session to final approval in a temp folder. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
+The smoke client starts `dma-server` over stdio, lists the 26 tools, runs `run_rules` on the synthetic fixture model, and runs one 11-stage build session to final approval in a temp folder, with sampling permission declined, then writes the XLSX, the requirement document and the lineage. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
 
 To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls the SMX, knowledge base, lineage and gate tools on the fixtures (the tools that read Power BI need a live token, so they are left out) and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
 
@@ -64,7 +64,7 @@ Every IDE starts the same command, `uv run dma-server`, from the repo root. The 
 
 ### *2.3. Kiro*
 
-- MCP: `.kiro/settings/mcp.json`. Kiro starts servers with the first workspace root as the working directory, so open the repo folder as the first root. The read-only tools are auto-approved. The tools that write (the gate tools, `compile_report` and `write_artifact`) still ask for approval, which gives the modeller a second click on every decision.
+- MCP: `.kiro/settings/mcp.json`. Kiro starts servers with the first workspace root as the working directory, so open the repo folder as the first root. The read-only tools are auto-approved. The tools that write (the gate and permission tools, `compile_report` and `write_artifact`) and `sample_rows` still ask for approval, which gives the modeller a second click on every decision.
 - Skills: loaded from `.kiro/skills/`, which is a copy.
 - Project rules: `AGENTS.md`.
 
@@ -101,12 +101,15 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `pbi_get_report` | no | Reads a Power BI report, its semantic model and its data sources by ID |
 | `pbi_model_metadata` | no | Lists the semantic model's tables, columns, measures and M transforms, with the routes tried |
 | `start_session` | gate log | Starts a gated `review`, `build` or `lineage` session and returns its stages |
-| `submit_stage` | gate log | Records the next stage's output as a new version |
+| `submit_stage` | gate log | Records the next stage's output as a new version. On `bronze_identification` it also takes the `bronze_tables` list |
 | `record_decision` | gate log | Records `approve`, `suggest_changes` (comment) or `disapprove` (reason, then `redo`, `reopen` or `end`) |
 | `get_session` | no | Shows the current stage, versions, decision log and what is allowed next |
 | `list_sessions` | no | Lists gate sessions so one can be resumed |
-| `compile_report` | `output/` only | After final approval, writes the report and decisions files from approved stages plus the decision log |
-| `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json`, `proposed_smx_xlsx` or `lineage_mermaid` as a new file |
+| `grant_permission` | gate log | Logs the modeller's `data_extraction` permission for tables from the approved Bronze list, only at stage `data_extraction` |
+| `revoke_permission` | gate log | Logs the end of that permission; sampling stops at once |
+| `sample_rows` | no | Up to 20 rows of a granted Bronze table, only with a logged permission. A stub in Phase 0: returns `not_available` |
+| `compile_report` | `output/` only | After final approval, writes the report and decisions files from approved stages plus the decision and permission logs |
+| `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json`, `proposed_smx_xlsx`, `lineage_mermaid` or `requirements_md` as a new file |
 
 Every finding has `rule_id`, `severity`, `layer`, `table`, `column`, `message` and `evidence`. The rules are configured in `config/rules.yaml`:
 
@@ -161,6 +164,28 @@ The stage lists for each flow live in `config/gates.yaml`. A session keeps the l
 - `compile_report` and `write_artifact` are refused until the final stage is approved. The report uses approved versions only; superseded and disapproved versions appear only in the decision log.
 - Every event goes to `output/.sessions/<session_id>/events.jsonl`, append-only, with the user and a UTC timestamp. State is rebuilt from that file, so sessions survive a server restart. Use `list_sessions` and `get_session` to resume.
 - The server cannot see the modeller. The skills tell the IDE model to pass only the modeller's explicit word, and the server refuses anything other than the three decision values.
+
+The build flow follows the original 14-step flow of 2 Nov (REQUIREMENTS D5). Every stage has a gate; its three named gates are labelled major gates, and `start_session` and `get_session` return each stage's `label`, `og_step` and `major_gate`.
+
+| # | Stage | OG step | Major gate |
+| --- | --- | --- | --- |
+| 1 | `scope` | | |
+| 2 | `powerbi_intake` | 1 | |
+| 3 | `requirements` | 2 | |
+| 4 | `legacy_entities` | 3 | |
+| 5 | `bronze_identification` | 4 | 1: Bronze table list |
+| 6 | `data_extraction` | 5.1 | |
+| 7 | `reuse_check` | 6, 7 | |
+| 8 | `silver_staging` | 8 | |
+| 9 | `silver_idm` | 9 | 2: Silver schemas |
+| 10 | `gold` | 11, 12 | 3: Gold models |
+| 11 | `rules_pass` | | |
+
+Build sessions started before this change keep their 8 stages and still run.
+
+**Data extraction (FR-B11).** The approved `bronze_identification` version carries the Bronze table list (`submit_stage(..., bronze_tables=[...])`). At `data_extraction` the modeller may give a separate permission, logged by `grant_permission` with the user, time and tables. `sample_rows` is refused without an active permission, after `revoke_permission`, for a table that was not granted or is no longer in the approved Bronze list, and once `data_extraction` is approved. It caps rows at 20 and never writes them to disk. In Phase 0 there is no source connector, so it returns `not_available`; a future connector implements `RowSampler` in `src/dma/connectors/sampling.py`. If the permission is declined or sampling is not available, the stage output says "skipped" with the reason and is approved like any other.
+
+**Requirement document (FR-B10).** The `requirements` stage is drafted with the headings in `config/requirements_doc.yaml`, which can change without code changes while Q12 is open. After the final gate, `write_artifact(kind="requirements_md", content="")` writes the approved `requirements` version under a header with the session, version and approver, and lists any template headings missing from it.
 
 ### *3.5. Power BI*
 
