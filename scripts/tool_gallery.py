@@ -33,16 +33,24 @@ CALLS = [
     ("read_kb", {"name": "glossary.md"}),
     ("lineage_diagram", {"table": "gold_fleet.f_booking", "direction": "upstream"}),
     ("sql_column_lineage", {"sql": (FIX / "sql" / "fct_booking.sql").read_text(encoding="utf-8"), "column": "total_amount", "dialect": "databricks"}),
-    ("start_session", {"flow": "lineage", "scope": "synthetic_fleet_eip gold_fleet.f_booking"}),
-    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Trace gold_fleet.f_booking to bronze."}),
-    ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 1, "decision": "suggest_changes", "note": "Include the column lineage for total_amount."}),
-    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Trace gold_fleet.f_booking and total_amount to bronze."}),
+    ("start_session", {"flow": "build", "scope": "Synthetic fleet bookings report"}),
+    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Report: synthetic fleet bookings. BU: fleet."}),
+    ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 1, "decision": "suggest_changes", "note": "Add the target SMX model."}),
+    ("submit_stage", {"session_id": "$sid", "stage": "scope", "content": "Report: synthetic fleet bookings. BU: fleet. SMX model: synthetic_fleet_eip."}),
     ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 2, "decision": "approve"}),
     ("write_artifact", {"kind": "lineage_mermaid", "name": "too_early", "content": "flowchart LR", "session_id": "$sid"}),
+    ("_approve_until", {"stage": "bronze_identification"}),
+    ("submit_stage", {"session_id": "$sid", "stage": "bronze_identification", "content": "Bronze: brnz_fleetops.booking (dbt model fct_booking), brnz_fleetops.driver (data analysis).", "bronze_tables": ["brnz_fleetops.booking", "brnz_fleetops.driver"]}),
+    ("record_decision", {"session_id": "$sid", "stage": "bronze_identification", "version": 1, "decision": "approve"}),
+    ("sample_rows", {"session_id": "$sid", "table": "brnz_fleetops.booking"}),
+    ("submit_stage", {"session_id": "$sid", "stage": "data_extraction", "content": "Skipped: the modeller declined data extraction, so data analysis is metadata only."}),
+    ("record_decision", {"session_id": "$sid", "stage": "data_extraction", "version": 1, "decision": "approve"}),
     ("_approve_rest", {}),
     ("get_session", {"session_id": "$sid"}),
     ("compile_report", {"session_id": "$sid"}),
     ("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "should be refused", "session_id": "$sid"}),
+    ("write_artifact", {"kind": "requirements_md", "name": "fleet_requirements", "content": "", "session_id": "$sid"}),
+    ("write_artifact", {"kind": "proposed_smx_xlsx", "name": "fleet_model", "content": '{"Gold - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]}', "session_id": "$sid"}),
     ("write_artifact", {"kind": "lineage_mermaid", "name": "f_booking_lineage", "content": "flowchart LR\n  b[brnz_fleetops.booking] --> f[gold_fleet.f_booking]\n", "session_id": "$sid"}),
     ("list_sessions", {}),
 ]
@@ -147,10 +155,12 @@ def section(i, name, desc, read_only, args, data, error) -> str:
             f'<details><summary>raw JSON result</summary><pre>{raw}</pre></details></section>')
 
 
-async def approve_rest(client, sid: str) -> None:
-    """Approve the remaining stages without a gallery section, so the final-approval tools can be shown."""
+async def approve_rest(client, sid: str, until: str | None = None) -> None:
+    """Approve the remaining stages (or those before `until`) without a gallery section, so later tools can be shown."""
     view = (await client.call_tool("get_session", {"session_id": sid})).structured_content
     for st in view["stages"]:
+        if st["stage"] == until:
+            break
         if st["status"] != "approved":
             v = (await client.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}."})).structured_content["version"]
             await client.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v, "decision": "approve"})
@@ -167,8 +177,8 @@ async def run(demo_out: Path) -> str:
         tools = {t.name: t for t in (await client.list_tools()).tools}
         parts, nav, sid = [], [], ""
         for i, (name, args) in enumerate(CALLS):
-            if name == "_approve_rest":
-                await approve_rest(client, sid)
+            if name in ("_approve_rest", "_approve_until"):
+                await approve_rest(client, sid, args.get("stage"))
                 continue
             args = {k: (sid if v == "$sid" else v) for k, v in args.items()}
             result = await client.call_tool(name, args)

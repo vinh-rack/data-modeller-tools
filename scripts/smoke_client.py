@@ -1,10 +1,11 @@
-"""Spawn dma-server over stdio, list tools, call run_rules on a fixture model, then run one gated session to approval. Exit 1 on any failure.
+"""Spawn dma-server over stdio, list tools, call run_rules on a fixture model, then run one 11-stage build session to approval. Exit 1 on any failure.
 
 Run: uv run python scripts/smoke_client.py [model_name]
 Session logs and artifacts from the gate check go to a temp folder, not output/.
 """
 
 import asyncio
+import json
 import os
 import shutil
 import sys
@@ -15,24 +16,56 @@ from mcp import Client, StdioServerParameters
 DEFAULT_MODEL = "synthetic_fleet_eip"
 
 
+BRONZE = ["brnz_fleetops.booking", "brnz_fleetops.driver"]
+
+
+def fail(msg: str) -> bool:
+    print(f"gate: {msg}", file=sys.stderr)
+    return False
+
+
 async def gate_check(client: Client) -> bool:
-    started = await client.call_tool("start_session", {"flow": "lineage", "scope": "smoke test"})
-    sid = started.structured_content["session_id"]
+    """The build flow end to end on fixtures: 11 gates, the permission declined, then the three final outputs."""
+    started = (await client.call_tool("start_session", {"flow": "build", "scope": "smoke test report"})).structured_content
+    sid = started["session_id"]
+    majors = [s["major_gate"] for s in started["stages"] if s.get("major_gate")]
+    if len(started["stages"]) != 11 or majors != ["Bronze table list", "Silver schemas", "Gold models"]:
+        return fail(f"unexpected build stages or major gates: {majors}")
     early = await client.call_tool("write_artifact", {"kind": "lineage_mermaid", "name": "early", "content": "flowchart LR", "session_id": sid})
     if not early.is_error:
-        print("gate: write_artifact was not blocked before approval", file=sys.stderr)
-        return False
-    for st in started.structured_content["stages"]:
-        v = await client.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": f"smoke {st['stage']}"})
-        d = await client.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v.structured_content["version"], "decision": "approve"})
+        return fail("write_artifact was not blocked before approval")
+    refused = None
+    for st in started["stages"]:
+        stage = st["stage"]
+        args = {"session_id": sid, "stage": stage, "content": f"smoke {stage}"}
+        if stage == "bronze_identification":
+            args["bronze_tables"] = BRONZE
+        if stage == "data_extraction":
+            # The modeller declined, so no grant is logged and sampling must be refused.
+            refused = await client.call_tool("sample_rows", {"session_id": sid, "table": BRONZE[0]})
+            args["content"] = "skipped: the modeller declined data extraction, so data analysis is metadata only"
+        v = await client.call_tool("submit_stage", args)
+        if v.is_error:
+            return fail(f"submit_stage {stage} failed: {v.content[0].text}")
+        d = await client.call_tool("record_decision", {"session_id": sid, "stage": stage, "version": v.structured_content["version"], "decision": "approve"})
         if d.is_error:
-            print(f"gate: record_decision failed: {d.content[0].text}", file=sys.stderr)
-            return False
+            return fail(f"record_decision failed: {d.content[0].text}")
+    if refused is None or not refused.is_error:
+        return fail("sample_rows was not refused without a permission")
     report = await client.call_tool("compile_report", {"session_id": sid})
     if report.is_error:
-        print(f"gate: compile_report failed: {report.content[0].text}", file=sys.stderr)
-        return False
-    print(f"gate: write blocked before approval, {len(started.structured_content['stages'])} stages approved, compile_report wrote {len(report.structured_content['artifacts'])} files")
+        return fail(f"compile_report failed: {report.content[0].text}")
+    mermaid = (await client.call_tool("lineage_diagram", {"table": "gold_fleet.f_booking"})).structured_content["mermaid"]
+    writes = [
+        {"kind": "proposed_smx_xlsx", "name": "smoke_model", "content": json.dumps({"Gold - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]})},
+        {"kind": "requirements_md", "name": "smoke_requirements", "content": ""},
+        {"kind": "lineage_mermaid", "name": "smoke_lineage", "content": mermaid},
+    ]
+    for w in writes:
+        r = await client.call_tool("write_artifact", {**w, "session_id": sid})
+        if r.is_error:
+            return fail(f"write_artifact {w['kind']} failed: {r.content[0].text}")
+    print(f"gate: write blocked before approval, {len(started['stages'])} build stages approved, sampling refused without permission, compile_report wrote {len(report.structured_content['artifacts'])} files, then xlsx, requirements and lineage")
     return True
 
 
