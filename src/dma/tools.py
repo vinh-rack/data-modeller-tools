@@ -3,7 +3,7 @@
 import json
 from collections import Counter
 from functools import cached_property
-from typing import Annotated, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
@@ -127,8 +127,8 @@ class DmaTools:
         self._dbt_pull: PullResult | None = None
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
-            gates, templates = load_gates(settings.config_dir)
-            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates)
+            gates, templates, smx_template = load_gates(settings.config_dir)
+            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template)
         except GateError as e:
             raise ToolError(str(e)) from e
 
@@ -349,9 +349,10 @@ class DmaTools:
         stage: Annotated[str, Field(description="The stage being presented. Must be the next stage after the last approved one.")],
         content: Annotated[str, Field(description="The full stage output shown to the modeller: output, evidence and assumptions.")],
         bronze_tables: Annotated[list[str] | None, Field(description="Only for stage bronze_identification: the Bronze tables this version proposes, e.g. raw.raw_orders. Approving the version locks the list that data extraction may sample.")] = None,
+        smx_rows: Annotated[dict[str, list[dict[str, Any]]] | None, Field(description='Build stages only: rows for the output SMX workbook as {"<sheet>": [{"<header>": value}]}, using the sheet and header names of config/smx_template.yaml. Bronze on bronze_identification, Silver - Staging on silver_staging, Silver - IDM on silver_idm, GOLD - SDM and Report Table Mapping on gold, Lookup on silver_idm or gold. Leave Status and Reviewed Date empty.')] = None,
     ) -> StageVersion:
         try:
-            return self.gate.submit(session_id, stage, content, bronze_tables)
+            return self.gate.submit(session_id, stage, content, bronze_tables, smx_rows)
         except GateError as e:
             raise ToolError(str(e)) from e
 

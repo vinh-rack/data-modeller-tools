@@ -16,8 +16,8 @@ def out(tmp_path):
 
 
 def real_store(out):
-    gates, templates = load_gates(CONFIG_DIR)
-    return GateStore(ArtifactWriter(out), gates, user="t", templates=templates)
+    gates, templates, smx_template = load_gates(CONFIG_DIR)
+    return GateStore(ArtifactWriter(out), gates, user="t", templates=templates, smx_template=smx_template)
 
 
 def make_store(out, user="tester"):
@@ -414,3 +414,59 @@ def test_template_headings_kept_in_session_and_unknown_template_refused(out):
     assert req.template == "requirements_doc.yaml" and req.headings[0] == "Report purpose" and "Open questions" in req.headings
     with pytest.raises(GateError, match="not loaded"):
         GateStore(ArtifactWriter(out), {"flows": {"build": [{"id": "requirements", "template": "nope.yaml"}]}}, user="t")
+
+
+# Rows for the output SMX workbook, checked against config/smx_template.yaml.
+
+GOLD_ROW = {"Schema Name": "gold_fleet", "table name": "f_booking", "column name": "booking_id", "pk": "y", "source table": "slvr_cdm.booking", "source column": "booking_id", "rules": "1:1 mapping"}
+
+
+def build_at(store, stage):
+    sid = store.start("build", "report R").session_id
+    for st in store.flows["build"]:
+        if st == stage:
+            return sid
+        args = {"bronze_tables": ["raw.raw_orders"]} if st == "bronze_identification" else {}
+        v = store.submit(sid, st, f"APPROVED {st}", **args).version
+        store.decide(sid, st, v, "approve")
+    return sid
+
+
+def test_smx_rows_stored_with_template_spelling(out):
+    store = real_store(out)
+    sid = build_at(store, "gold")
+    v = store.submit(sid, "gold", "gold v1", smx_rows={"gold - sdm": [GOLD_ROW], "Report Table Mapping": [{"PBI Report": "R", "Tables": "gold_fleet.f_booking", "PBI Table": "Booking", "Status": ""}]})
+    assert v.smx_row_counts == {"GOLD - SDM": 1, "Report Table Mapping": 1}
+    stored = store._load(sid).versions["gold"][0]["smx_rows"]
+    assert set(stored["GOLD - SDM"][0]) == {"schema name", "table name", "column name", "pk", "source table", "source column", "rules"}
+
+
+@pytest.mark.parametrize("rows,match", [
+    ({"Gold": [GOLD_ROW]}, "not in the template"),
+    ({"Bronze": [{"schema": "raw"}]}, "takes rows from stages"),
+    ({"GOLD - SDM": [{**GOLD_ROW, "PIC": "me"}]}, "not a header"),
+    ({"Report Table Mapping": [{"PBI Report": "R", "Status": "approved"}]}, "stays empty"),
+    ({"GOLD - SDM": []}, "non-empty"),
+    ({"GOLD - SDM": [{"rules": {"nested": 1}}]}, "text, a number"),
+])
+def test_smx_rows_refused(out, rows, match):
+    store = real_store(out)
+    sid = build_at(store, "gold")
+    with pytest.raises(GateError, match=match):
+        store.submit(sid, "gold", "gold v1", smx_rows=rows)
+
+
+def test_approved_smx_rows_only_from_approved_versions(out):
+    store = real_store(out)
+    sid = build_at(store, "gold")
+    store.submit(sid, "gold", "gold v1", smx_rows={"GOLD - SDM": [{**GOLD_ROW, "column name": "SUPERSEDED"}]})
+    store.decide(sid, "gold", 1, "suggest_changes", "rename")
+    store.submit(sid, "gold", "gold v2", smx_rows={"GOLD - SDM": [GOLD_ROW]})
+    store.decide(sid, "gold", 2, "approve")
+    with pytest.raises(GateError, match="blocked"):
+        store.approved_smx_rows(sid)
+    approve(store, sid, "rules_pass")
+    sheets = store.approved_smx_rows(sid)
+    assert [s["name"] for s in sheets] == ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
+    gold = next(s for s in sheets if s["name"] == "GOLD - SDM")
+    assert [r["column name"] for r in gold["rows"]] == ["booking_id"]

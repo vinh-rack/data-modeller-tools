@@ -5,6 +5,7 @@ continues where the last one stopped. All file IO goes through ArtifactWriter.
 """
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ class StageVersion(BaseModel):
     submitted_by: str
     submitted_at: str
     bronze_tables: list[str] | None = None
+    smx_row_counts: dict[str, int] | None = None
 
 
 class StageState(BaseModel):
@@ -152,7 +154,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     for e in events[1:]:
         kind = e.get("type")
         if kind == "stage_submitted":
-            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"], "bronze_tables": e.get("bronze_tables")})
+            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"], "bronze_tables": e.get("bronze_tables"), "smx_rows": e.get("smx_rows")})
         elif kind == "decision":
             rec = s.versions[e["stage"]][e["version"] - 1]
             rec["status"] = VERSION_STATUS[e["decision"]]
@@ -177,7 +179,8 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
 
 
 def _version(v: dict[str, Any]) -> StageVersion:
-    return StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"], bronze_tables=v.get("bronze_tables"))
+    counts = {k: len(rows) for k, rows in (v.get("smx_rows") or {}).items()} or None
+    return StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"], bronze_tables=v.get("bronze_tables"), smx_row_counts=counts)
 
 
 def _check_bronze(stage: str, tables: list[str]) -> list[str]:
@@ -212,7 +215,7 @@ def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
 
 
 class GateStore:
-    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None):
+    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None):
         flows = config.get("flows") or {}
         if not flows or not all(isinstance(v, list) and v for v in flows.values()):
             raise GateError("gates.yaml must define flows, each a non-empty list of stages")
@@ -226,6 +229,8 @@ class GateStore:
                         raise GateError(f"stage {m['id']!r} names template {m['template']!r}, which was not loaded")
                     m["headings"] = [str(h) for h in templates[m["template"]].get("headings") or []]
         self.max_content_bytes = int(config.get("max_content_bytes", 1_000_000))
+        # Output SMX sheets (config/smx_template.yaml): which stages may give rows for each sheet, and its headers.
+        self.smx_sheets: list[dict[str, Any]] = list((smx_template or {}).get("sheets") or [])
         self.writer = writer
         self.user = user
         self.clock = clock
@@ -257,7 +262,7 @@ class GateStore:
         self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
         return self.view(session_id)
 
-    def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None) -> StageVersion:
+    def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None, smx_rows: dict[str, list[dict[str, Any]]] | None = None) -> StageVersion:
         s = self._load_active(session_id)
         if s.complete:
             raise GateError(f"every stage of session {session_id} is approved. Nothing more can be submitted.")
@@ -275,6 +280,11 @@ class GateStore:
         record: dict[str, Any] = {"type": "stage_submitted", "stage": stage, "version": len(s.versions[stage]) + 1, "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
         if bronze_tables is not None:
             record["bronze_tables"] = _check_bronze(stage, bronze_tables)
+        if smx_rows is not None:
+            record["smx_rows"] = self._check_smx_rows(stage, smx_rows)
+            size += len(json.dumps(record["smx_rows"]).encode("utf-8"))
+            if size > self.max_content_bytes:
+                raise GateError(f"content plus smx_rows is {size} bytes, the limit is {self.max_content_bytes}")
         self._append(session_id, record)
         return _version(self._load(session_id).versions[stage][-1])
 
@@ -357,6 +367,52 @@ class GateStore:
         if key not in {t.lower() for t in s.approved_bronze or []}:
             raise GateError(f"table {table!r} is not in the currently approved Bronze list")
         return granted[key]
+
+    def _check_smx_rows(self, stage: str, smx_rows: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
+        """Rows for the output workbook, checked against config/smx_template.yaml and stored with the template's spelling."""
+        if not isinstance(smx_rows, dict) or not smx_rows:
+            raise GateError('smx_rows must be {"<sheet>": [{"<header>": value}]} with at least one sheet')
+        by_name = {s["name"].lower(): s for s in self.smx_sheets}
+        out: dict[str, list[dict[str, Any]]] = {}
+        for sheet_name, rows in smx_rows.items():
+            sheet = by_name.get(str(sheet_name).strip().lower())
+            if sheet is None:
+                raise GateError(f"smx_rows sheet {sheet_name!r} is not in the template: {[s['name'] for s in self.smx_sheets]}")
+            if stage not in sheet.get("stages", []):
+                raise GateError(f"sheet {sheet['name']!r} takes rows from stages {sheet.get('stages')}, not from {stage!r}")
+            headers = {h.lower(): h for h in sheet["headers"]}
+            empty = set(sheet.get("left_empty") or [])
+            if not isinstance(rows, list) or not rows:
+                raise GateError(f"smx_rows[{sheet['name']!r}] must be a non-empty list of rows")
+            clean = []
+            for i, row in enumerate(rows, 1):
+                if not isinstance(row, dict):
+                    raise GateError(f"{sheet['name']} row {i} must be an object of header: value")
+                rec: dict[str, Any] = {}
+                for k, v in row.items():
+                    h = headers.get(str(k).strip().lower())
+                    if h is None:
+                        raise GateError(f"{sheet['name']} row {i}: {k!r} is not a header of that sheet: {sheet['headers']}")
+                    if v is not None and not isinstance(v, (str, int, float, bool)):
+                        raise GateError(f"{sheet['name']} row {i}: {h!r} must be text, a number or empty")
+                    if h in empty and v not in (None, ""):
+                        raise GateError(f"{sheet['name']} row {i}: {h!r} stays empty; approval stays with AGI reviewers")
+                    rec[h] = v
+                clean.append(rec)
+            out[sheet["name"]] = clean
+        return out
+
+    def approved_smx_rows(self, session_id: str) -> list[dict[str, Any]]:
+        """Every template sheet in order, with the rows of the approved stage versions in flow order. Only after final approval."""
+        s = self.require_complete(session_id)
+        sheets = []
+        for sheet in self.smx_sheets:
+            rows: list[dict[str, Any]] = []
+            for stage in s.stages:
+                if stage in sheet.get("stages", []):
+                    rows += ((s.versions[stage][s.approved[stage] - 1].get("smx_rows") or {}).get(sheet["name"]) or [])
+            sheets.append({"name": sheet["name"], "headers": list(sheet["headers"]), "rows": rows})
+        return sheets
 
     def require_complete(self, session_id: str) -> _Session:
         s = self._load(session_id)
