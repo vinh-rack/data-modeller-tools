@@ -22,6 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "tests" / "fixtures"
 LAYERS = ["bronze", "silver_staging", "silver_idm", "gold"]
 
+# Synthetic rows for the output workbook, by the stage that proposes them.
+SMX_ROWS = {
+    "bronze_identification": {"Bronze": [{"schema": "brnz_fleetops", "table name": "booking", "source system": "fleetops"}, {"schema": "brnz_fleetops", "table name": "driver", "source system": "fleetops"}]},
+    "silver_staging": {"Silver - Staging": [{"target schema": "slvr_stg", "target table": "booking", "target column name": "booking_num", "source table name": "brnz_fleetops.booking", "source column name": "bookingno", "join/rule/filter applied": "pk"}]},
+    "silver_idm": {"Silver - IDM": [{"schema": "slvr_cdm", "table_name": "booking", "column name": "booking_id", "source table / file": "slvr_stg.booking", "source column": "booking_num", "pk": "Y", "rules": "hash(booking_num)"}]},
+    "gold": {
+        "GOLD - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id", "pk": "y", "source table": "slvr_cdm.booking", "source column": "booking_id", "rules": "1:1 mapping"}],
+        "Report Table Mapping": [{"PBI Report": "Synthetic Fleet Bookings", "Tables": "gold_fleet.f_booking", "SMX": "synthetic_fleet_eip", "PBI Table": "Booking"}],
+    },
+}
+
 CALLS = [
     ("list_models", {}),
     ("get_model", {"model_name": "synthetic_logistics_canonical"}),
@@ -40,7 +51,7 @@ CALLS = [
     ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 2, "decision": "approve"}),
     ("write_artifact", {"kind": "lineage_mermaid", "name": "too_early", "content": "flowchart LR", "session_id": "$sid"}),
     ("_approve_until", {"stage": "bronze_identification"}),
-    ("submit_stage", {"session_id": "$sid", "stage": "bronze_identification", "content": "Bronze: brnz_fleetops.booking (dbt model fct_booking), brnz_fleetops.driver (data analysis).", "bronze_tables": ["brnz_fleetops.booking", "brnz_fleetops.driver"]}),
+    ("submit_stage", {"session_id": "$sid", "stage": "bronze_identification", "content": "Bronze: brnz_fleetops.booking (dbt model fct_booking), brnz_fleetops.driver (data analysis).", "bronze_tables": ["brnz_fleetops.booking", "brnz_fleetops.driver"], "smx_rows": SMX_ROWS["bronze_identification"]}),
     ("record_decision", {"session_id": "$sid", "stage": "bronze_identification", "version": 1, "decision": "approve"}),
     ("sample_rows", {"session_id": "$sid", "table": "brnz_fleetops.booking"}),
     ("submit_stage", {"session_id": "$sid", "stage": "data_extraction", "content": "Skipped: the modeller declined data extraction, so data analysis is metadata only."}),
@@ -162,7 +173,10 @@ async def approve_rest(client, sid: str, until: str | None = None) -> None:
         if st["stage"] == until:
             break
         if st["status"] != "approved":
-            v = (await client.call_tool("submit_stage", {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}."})).structured_content["version"]
+            args = {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}."}
+            if st["stage"] in SMX_ROWS:
+                args["smx_rows"] = SMX_ROWS[st["stage"]]
+            v = (await client.call_tool("submit_stage", args)).structured_content["version"]
             await client.call_tool("record_decision", {"session_id": sid, "stage": st["stage"], "version": v, "decision": "approve"})
 
 

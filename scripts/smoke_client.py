@@ -10,12 +10,24 @@ import shutil
 import sys
 import tempfile
 
+import openpyxl
 from mcp import Client, StdioServerParameters
 
 DEFAULT_MODEL = "synthetic_fleet_eip"
 
 
 BRONZE = ["brnz_fleetops.booking", "brnz_fleetops.driver"]
+WAVE3 = ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
+# Synthetic rows for the output workbook, by the stage that proposes them.
+SMX_ROWS = {
+    "bronze_identification": {"Bronze": [{"schema": "brnz_fleetops", "table name": "booking", "source system": "fleetops"}, {"schema": "brnz_fleetops", "table name": "driver", "source system": "fleetops"}]},
+    "silver_staging": {"Silver - Staging": [{"target schema": "slvr_stg", "target table": "booking", "target column name": "booking_num", "source table name": "brnz_fleetops.booking", "source column name": "bookingno", "join/rule/filter applied": "pk"}]},
+    "silver_idm": {"Silver - IDM": [{"schema": "slvr_cdm", "table_name": "booking", "column name": "booking_id", "source table / file": "slvr_stg.booking", "source column": "booking_num", "pk": "Y", "rules": "hash(booking_num)"}]},
+    "gold": {
+        "GOLD - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id", "pk": "y", "source table": "slvr_cdm.booking", "source column": "booking_id", "rules": "1:1 mapping"}],
+        "Report Table Mapping": [{"PBI Report": "Synthetic Fleet Bookings", "Tables": "gold_fleet.f_booking", "SMX": "synthetic_fleet_eip", "PBI Table": "Booking"}],
+    },
+}
 
 
 def fail(msg: str) -> bool:
@@ -39,6 +51,8 @@ async def gate_check(client: Client) -> bool:
         args = {"session_id": sid, "stage": stage, "content": f"smoke {stage}"}
         if stage == "bronze_identification":
             args["bronze_tables"] = BRONZE
+        if stage in SMX_ROWS:
+            args["smx_rows"] = SMX_ROWS[stage]
         if stage == "data_extraction":
             # The modeller declined, so no grant is logged and sampling must be refused.
             refused = await client.call_tool("sample_rows", {"session_id": sid, "table": BRONZE[0]})
@@ -64,7 +78,13 @@ async def gate_check(client: Client) -> bool:
         r = await client.call_tool("write_artifact", {**w, "session_id": sid})
         if r.is_error:
             return fail(f"write_artifact {w['kind']} failed: {r.content[0].text}")
-    print(f"gate: write blocked before approval, {len(started['stages'])} build stages approved, sampling refused without permission, compile_report wrote {len(report.structured_content['artifacts'])} files, then xlsx, requirements and lineage")
+        if w["kind"] == "proposed_smx_xlsx":
+            wb = openpyxl.load_workbook(r.structured_content["path"], read_only=True)
+            names, gold = wb.sheetnames, [row for row in wb["GOLD - SDM"].iter_rows(min_row=2, values_only=True)]
+            wb.close()
+            if names != WAVE3 or len(gold) != 1:
+                return fail(f"unexpected workbook: sheets {names}, {len(gold)} Gold rows")
+    print(f"gate: write blocked before approval, {len(started['stages'])} build stages approved, sampling refused without permission, compile_report wrote {len(report.structured_content['artifacts'])} files, then the 6-sheet workbook, requirements and lineage")
     return True
 
 
