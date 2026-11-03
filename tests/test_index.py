@@ -123,3 +123,18 @@ def test_fleet_fixture_is_a_wave3_workbook(index):
     info = index.models["synthetic_fleet_eip"]
     assert sorted(info.sheets) == ["Bronze", "GOLD - SDM", "Silver - IDM", "Silver - Staging"]
     assert not any(t.name == "lkp_booking_status" for t in index.tables)
+
+
+def test_output_template_matches_the_wave3_fixture_headers():
+    from conftest import CONFIG_DIR
+    from dma.config import load_yaml
+
+    template = load_yaml(CONFIG_DIR, "smx_template.yaml")
+    assert [s["name"] for s in template["sheets"]] == WAVE3_SHEETS
+    wb = openpyxl.load_workbook(SMX_DIR / "synthetic_fleet_eip.xlsx", read_only=True, data_only=True)
+    for s in template["sheets"]:
+        header = [c for c in next(wb[s["name"]].iter_rows(max_row=1, values_only=True)) if c is not None]
+        assert header == s["headers"], s["name"]
+    wb.close()
+    rtm = next(s for s in template["sheets"] if s["name"] == "Report Table Mapping")
+    assert set(rtm["left_empty"]) <= set(rtm["headers"])

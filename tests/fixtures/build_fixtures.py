@@ -61,7 +61,7 @@ def build_eip_family():
         ("slvr_stg", "booking_enriched", "booking_num", "string", 1, "gold_fleet.f_booking", "booking_id", "pk"),
     ])
 
-    idm_header = ["schema", "subject area", "table_name", "column name", "data type", "set no.", "source system", "source table / file", "column", "pk", "scd 2", "rules"]
+    idm_header = ["schema", "subject area", "table_name", "column name", "data type", "set no.", "source system", "source table / file", "source column", "pk", "scd 2", "rules"]
     _sheet(wb, "Silver - IDM", idm_header, [
         ("slvr_cdm", "fleet", "booking", "-", None, 1, "slvr_stg", "booking, meter_change", "-", None, None, "booking left join meter_change on booking_num"),
         ("slvr_cdm", "fleet", "booking", "booking_id", "string", 1, "slvr_stg", "booking", "booking_num", "Y", "-", "hash(booking_num)"),

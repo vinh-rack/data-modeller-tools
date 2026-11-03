@@ -1,0 +1,29 @@
+# Output SMX workbook (REQUIREMENTS FR-B8, D6, Q1 resolved): one workbook per model, in the layout of
+# EIP_SMX_Facilities_phase2_wave3.xlsx. Header names only; no rows are ever copied from client workbooks.
+# The team tracking columns (PIC, Version, Updated By, Updated Date, Development Planned Date, Expected
+# Completion Date, ETL POC) are left out because the agent cannot fill them.
+#
+# Per sheet: name, headers in order, the build stages whose approved smx_rows fill it, and columns that must
+# stay empty because approval stays with AGI reviewers. The older CDM v1.0 layout is read (smx_mapping.yaml)
+# but never written.
+layout: EIP_SMX wave3
+sheets:
+  - name: Bronze
+    stages: [bronze_identification]
+    headers: [schema, table name, source system, source database/schema, description]
+  - name: Silver - Staging
+    stages: [silver_staging]
+    headers: [target schema, target table, target column name, data type, set no., source table name, source column name, join/rule/filter applied]
+  - name: Silver - IDM
+    stages: [silver_idm]
+    headers: [schema, subject area, table_name, column name, data type, set no., source system, source table / file, source column, pk, scd 2, rules]
+  - name: GOLD - SDM
+    stages: [gold]
+    headers: [schema name, table name, column name, set no., pk, source system, source table, source column, data type, rules]
+  - name: Lookup
+    stages: [silver_idm, gold]
+    headers: [Schema Name, Table Name, Column Name, SET, PK, Rule Related Comments]
+  - name: Report Table Mapping
+    stages: [gold]
+    headers: [PBI Report, Odata Tables (Existing Redshift table), Tables, Status, SMX, Reviewed Date, Comments, PBI Table]
+    left_empty: [Status, Reviewed Date]
