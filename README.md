@@ -101,7 +101,7 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `pbi_get_report` | no | Reads a Power BI report, its semantic model and its data sources by ID |
 | `pbi_model_metadata` | no | Lists the semantic model's tables, columns, measures and M transforms, with the routes tried |
 | `start_session` | gate log | Starts a gated `review`, `build` or `lineage` session and returns its stages |
-| `submit_stage` | gate log | Records the next stage's output as a new version. On `bronze_identification` it also takes the `bronze_tables` list |
+| `submit_stage` | gate log | Records the next stage's output as a new version. On `bronze_identification` it also takes the `bronze_tables` list, and on the build design stages the `smx_rows` for the workbook |
 | `record_decision` | gate log | Records `approve`, `suggest_changes` (comment) or `disapprove` (reason, then `redo`, `reopen` or `end`) |
 | `get_session` | no | Shows the current stage, versions, decision log and what is allowed next |
 | `list_sessions` | no | Lists gate sessions so one can be resumed |
@@ -109,7 +109,7 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `revoke_permission` | gate log | Logs the end of that permission; sampling stops at once |
 | `sample_rows` | no | Up to 20 rows of a granted Bronze table, only with a logged permission. A stub in Phase 0: returns `not_available` |
 | `compile_report` | `output/` only | After final approval, writes the report and decisions files from approved stages plus the decision and permission logs |
-| `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json`, `proposed_smx_xlsx`, `lineage_mermaid` or `requirements_md` as a new file |
+| `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json` or `lineage_mermaid`, or the server-built `proposed_smx_xlsx` (build only) and `requirements_md`, as a new file |
 
 Every finding has `rule_id`, `severity`, `layer`, `table`, `column`, `message` and `evidence`. The rules are configured in `config/rules.yaml`:
 
@@ -128,7 +128,7 @@ Every finding has `rule_id`, `severity`, `layer`, `table`, `column`, `message` a
 
 RULE-10 (load behaviour documented) is not built: the SMX layouts have no SCD or load type column to check, so it waits for the official template (Q1).
 
-`config/smx_mapping.yaml` maps SMX sheet names and header aliases to fields. It is a placeholder built from the observed layouts, so confirm it against the official SMX template.
+`config/smx_mapping.yaml` maps SMX sheet names and header aliases to fields for reading. It reads the wave3 layout, the older CDM v1.0 layout (DocInfo, Bronze - Landing, Lookups, Silver- Staging) and the canonical A2 layout, because Review and the reuse check open existing workbooks in all of them.
 
 ### *3.2. Knowledge base and lineage*
 
@@ -184,6 +184,19 @@ The build flow follows the original 14-step flow of 2 Nov (REQUIREMENTS D5). Eve
 Build sessions started before this change keep their 8 stages and still run.
 
 **Data extraction (FR-B11).** The approved `bronze_identification` version carries the Bronze table list (`submit_stage(..., bronze_tables=[...])`). At `data_extraction` the modeller may give a separate permission, logged by `grant_permission` with the user, time and tables. `sample_rows` is refused without an active permission, after `revoke_permission`, for a table that was not granted or is no longer in the approved Bronze list, and once `data_extraction` is approved. It caps rows at 20 and never writes them to disk. In Phase 0 there is no source connector, so it returns `not_available`; a future connector implements `RowSampler` in `src/dma/connectors/sampling.py`. If the permission is declined or sampling is not available, the stage output says "skipped" with the reason and is approved like any other.
+
+**SMX workbook (FR-B8, D6).** A build writes one workbook per model, in the layout of `EIP_SMX_Facilities_phase2_wave3.xlsx` (Q1 resolved). `config/smx_template.yaml` holds the sheets and header names, in this order:
+
+| Sheet | Rows come from | Notes |
+| --- | --- | --- |
+| Bronze | `bronze_identification` | |
+| Silver - Staging | `silver_staging` | |
+| Silver - IDM | `silver_idm` | |
+| GOLD - SDM | `gold` | |
+| Lookup | `silver_idm`, `gold` | |
+| Report Table Mapping | `gold` | `Status` and `Reviewed Date` always empty: approval stays with AGI reviewers |
+
+The stages pass their rows as `submit_stage(..., smx_rows={"<sheet>": [{"<header>": value}]})`, checked against the template. After the final gate, `write_artifact(kind="proposed_smx_xlsx", content="")` writes all six sheets from the approved versions only, with a header row on sheets that got no rows. The team tracking columns (PIC, Updated By, Updated Date, Development Planned Date, Expected Completion Date, ETL POC) are left out, and the older CDM v1.0 layout is never written. Review sessions keep proposed changes in their findings.
 
 **Requirement document (FR-B10).** The `requirements` stage is drafted with the headings in `config/requirements_doc.yaml`, which can change without code changes while Q12 is open. After the final gate, `write_artifact(kind="requirements_md", content="")` writes the approved `requirements` version under a header with the session, version and approver, and lists any template headings missing from it.
 
