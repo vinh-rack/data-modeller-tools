@@ -475,9 +475,9 @@ class DmaTools:
 
     def write_artifact(
         self,
-        kind: Annotated[ArtifactKind, Field(description="findings_md, decisions_json, proposed_smx_xlsx (JSON {sheet: [rows]}), lineage_mermaid, or requirements_md (built by the server from the approved requirements stage; pass empty content).")],
+        kind: Annotated[ArtifactKind, Field(description="findings_md, decisions_json, lineage_mermaid, or a server-built kind with empty content: proposed_smx_xlsx (the wave3 SMX workbook from approved smx_rows, build sessions only) or requirements_md (the approved requirements stage).")],
         name: Annotated[str, Field(description="File name stem, letters, digits, '_', '-', '.' only. A timestamp prefix and extension are added.")],
-        content: Annotated[str, Field(description="File content. JSON text for decisions_json and proposed_smx_xlsx. Use only approved stage outputs. Empty for requirements_md.")],
+        content: Annotated[str, Field(description="File content, from approved stage outputs only. JSON text for decisions_json. Empty for proposed_smx_xlsx and requirements_md.")],
         session_id: Annotated[str, Field(description="Session whose final stage is approved. Writing is refused before that.")],
     ) -> WrittenArtifact:
         try:
@@ -487,6 +487,15 @@ class DmaTools:
                 if content.strip():
                     raise ToolError("requirements_md is built by the server from the approved requirements stage. Pass empty content.")
                 content, notes = self._requirements_doc(session_id)
+            elif kind == "proposed_smx_xlsx":
+                if content.strip():
+                    raise ToolError("proposed_smx_xlsx is built by the server from the approved stages' smx_rows. Pass empty content.")
+                if self.gate.view(session_id).flow != "build":
+                    raise ToolError("proposed_smx_xlsx is written by build sessions only; review proposals stay in the findings")
+                sheets = self.gate.approved_smx_rows(session_id)
+                empty = [s["name"] for s in sheets if not s["rows"]]
+                notes = [f"sheets with no approved rows (header only): {', '.join(empty)}"] if empty else []
+                content = json.dumps({"sheets": sheets}, ensure_ascii=False)
             written = self.writer.write(kind, name, content)
             written.notes = notes
             self.gate.record_artifact(session_id, written.path)

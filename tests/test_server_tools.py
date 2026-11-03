@@ -341,3 +341,60 @@ async def test_requirements_md_needs_a_requirements_stage(server):
         sid = await approved_session(c, "lineage")
         r = await c.call_tool("write_artifact", {"kind": "requirements_md", "name": "req", "content": "", "session_id": sid})
     assert r.is_error and "no 'requirements' stage" in r.content[0].text
+
+
+WAVE3 = ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
+SMX_ROWS = {
+    "bronze_identification": {"Bronze": [{"schema": "raw", "table name": "raw_orders", "source system": "ecom"}]},
+    "silver_staging": {"Silver - Staging": [{"target schema": "slvr_stg", "target table": "orders", "target column name": "order_num", "source table name": "raw.raw_orders", "source column name": "id", "join/rule/filter applied": "pk"}]},
+    "silver_idm": {"Silver - IDM": [{"schema": "slvr_cdm", "table_name": "orders", "column name": "order_id", "source table / file": "slvr_stg.orders", "source column": "order_num", "pk": "Y", "rules": "hash(order_num)"}]},
+    "gold": {"GOLD - SDM": [{"schema name": "gold_shop", "table name": "f_order", "column name": "order_id", "source table": "slvr_cdm.orders", "source column": "order_id", "rules": "1:1 mapping"}],
+             "Report Table Mapping": [{"PBI Report": "Orders", "Tables": "gold_shop.f_order", "SMX": "shop", "PBI Table": "Orders"}]},
+}
+
+
+async def run_build(c, gold_first=None):
+    sid = (await c.call_tool("start_session", {"flow": "build", "scope": "report R"})).structured_content["session_id"]
+    view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
+    for st in [s["stage"] for s in view["stages"]]:
+        args = {"session_id": sid, "stage": st, "content": f"APPROVED {st}"}
+        if st == "bronze_identification":
+            args["bronze_tables"] = ["raw.raw_orders"]
+        if st in SMX_ROWS:
+            args["smx_rows"] = SMX_ROWS[st]
+        if st == "gold" and gold_first:
+            v = (await c.call_tool("submit_stage", {**args, "smx_rows": gold_first})).structured_content["version"]
+            await c.call_tool("record_decision", {"session_id": sid, "stage": st, "version": v, "decision": "suggest_changes", "note": "fix"})
+        v = (await c.call_tool("submit_stage", args)).structured_content["version"]
+        await c.call_tool("record_decision", {"session_id": sid, "stage": st, "version": v, "decision": "approve"})
+        if st == "silver_idm":
+            early = await c.call_tool("write_artifact", {"kind": "proposed_smx_xlsx", "name": "early", "content": "", "session_id": sid})
+            assert early.is_error and "blocked" in early.content[0].text
+    return sid
+
+
+@pytest.mark.anyio
+async def test_smx_workbook_from_approved_stages_only(server):
+    import openpyxl
+
+    superseded = {"GOLD - SDM": [{"schema name": "gold_shop", "table name": "SUPERSEDED", "column name": "x"}]}
+    async with Client(server) as c:
+        sid = await run_build(c, gold_first=superseded)
+        with_content = await c.call_tool("write_artifact", {"kind": "proposed_smx_xlsx", "name": "m", "content": "{}", "session_id": sid})
+        ok = (await c.call_tool("write_artifact", {"kind": "proposed_smx_xlsx", "name": "shop_model", "content": "", "session_id": sid})).structured_content
+        review = await approved_session(c, "review")
+        refused = await c.call_tool("write_artifact", {"kind": "proposed_smx_xlsx", "name": "r", "content": "", "session_id": review})
+    assert with_content.is_error and "empty content" in with_content.content[0].text
+    assert refused.is_error and "build sessions only" in refused.content[0].text
+    wb = openpyxl.load_workbook(ok["path"], read_only=True)
+    assert wb.sheetnames == WAVE3
+    from conftest import CONFIG_DIR
+    from dma.config import load_yaml
+    template = {s["name"]: s["headers"] for s in load_yaml(CONFIG_DIR, "smx_template.yaml")["sheets"]}
+    rows = {name: [list(r) for r in wb[name].iter_rows(values_only=True)] for name in WAVE3}
+    wb.close()
+    assert all(rows[n][0] == template[n] for n in WAVE3)
+    assert [r[1] for r in rows["GOLD - SDM"][1:]] == ["f_order"] and not any("SUPERSEDED" in str(r) for r in rows["GOLD - SDM"])
+    assert rows["Lookup"] == [template["Lookup"]] and "Lookup" in ok["notes"][0]
+    rtm = dict(zip(template["Report Table Mapping"], rows["Report Table Mapping"][1]))
+    assert rtm["PBI Table"] == "Orders" and rtm["Status"] is None and rtm["Reviewed Date"] is None
