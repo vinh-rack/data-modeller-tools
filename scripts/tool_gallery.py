@@ -50,7 +50,7 @@ CALLS = [
     ("compile_report", {"session_id": "$sid"}),
     ("write_artifact", {"kind": "findings_md", "name": "../escape", "content": "should be refused", "session_id": "$sid"}),
     ("write_artifact", {"kind": "requirements_md", "name": "fleet_requirements", "content": "", "session_id": "$sid"}),
-    ("write_artifact", {"kind": "proposed_smx_xlsx", "name": "fleet_model", "content": '{"Gold - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]}', "session_id": "$sid"}),
+    ("write_artifact", {"kind": "proposed_smx_xlsx", "name": "fleet_model", "content": '{"sheets": [{"name": "GOLD - SDM", "headers": ["schema name", "table name", "column name"], "rows": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]}]}', "session_id": "$sid"}),
     ("write_artifact", {"kind": "lineage_mermaid", "name": "f_booking_lineage", "content": "flowchart LR\n  b[brnz_fleetops.booking] --> f[gold_fleet.f_booking]\n", "session_id": "$sid"}),
     ("list_sessions", {}),
 ]

@@ -57,7 +57,7 @@ async def gate_check(client: Client) -> bool:
         return fail(f"compile_report failed: {report.content[0].text}")
     mermaid = (await client.call_tool("lineage_diagram", {"table": "gold_fleet.f_booking"})).structured_content["mermaid"]
     writes = [
-        {"kind": "proposed_smx_xlsx", "name": "smoke_model", "content": json.dumps({"Gold - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]})},
+        {"kind": "proposed_smx_xlsx", "name": "smoke_model", "content": json.dumps({"sheets": [{"name": "GOLD - SDM", "headers": ["schema name", "table name", "column name"], "rows": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]}]})},
         {"kind": "requirements_md", "name": "smoke_requirements", "content": ""},
         {"kind": "lineage_mermaid", "name": "smoke_lineage", "content": mermaid},
     ]

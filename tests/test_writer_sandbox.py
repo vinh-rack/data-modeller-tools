@@ -105,12 +105,19 @@ def test_writes_all_kinds(writer, out):
     md = writer.write("findings_md", "review", "# Findings\n")
     js = writer.write("decisions_json", "decisions", json.dumps({"FACT-001": "accepted"}))
     mm = writer.write("lineage_mermaid", "lineage", "flowchart LR\n  a --> b\n")
-    xl = writer.write("proposed_smx_xlsx", "proposed", json.dumps({"GOLD - SDM": [{"schema name": "gold_fleet", "table name": "f_booking", "column name": "booking_id"}]}))
+    xl = writer.write("proposed_smx_xlsx", "proposed", json.dumps({"sheets": [{"name": "Bronze", "headers": ["schema"], "rows": []}, {"name": "GOLD - SDM", "headers": ["schema name", "table name", "column name"], "rows": [{"column name": "booking_id", "schema name": "gold_fleet", "table name": "f_booking"}]}]}))
     for a in (md, js, mm, xl):
         assert os.path.dirname(a.path) == str(out.resolve())
     assert json.loads(open(js.path, encoding="utf-8").read()) == {"FACT-001": "accepted"}
-    ws = openpyxl.load_workbook(xl.path, read_only=True)["GOLD - SDM"]
-    assert [list(r) for r in ws.iter_rows(values_only=True)] == [["schema name", "table name", "column name"], ["gold_fleet", "f_booking", "booking_id"]]
+    wb = openpyxl.load_workbook(xl.path, read_only=True)
+    assert wb.sheetnames == ["Bronze", "GOLD - SDM"]
+    assert [list(r) for r in wb["Bronze"].iter_rows(values_only=True)] == [["schema"]]
+    assert [list(r) for r in wb["GOLD - SDM"].iter_rows(values_only=True)] == [["schema name", "table name", "column name"], ["gold_fleet", "f_booking", "booking_id"]]
+    wb.close()
+    with pytest.raises(WriterError, match="not headers"):
+        writer.write("proposed_smx_xlsx", "bad", json.dumps({"sheets": [{"name": "Bronze", "headers": ["schema"], "rows": [{"PIC": "x"}]}]}))
+    with pytest.raises(WriterError, match="must be"):
+        writer.write("proposed_smx_xlsx", "old", json.dumps({"GOLD - SDM": [{"schema name": "x"}]}))
 
 
 def test_invalid_json_rejected(writer, out):

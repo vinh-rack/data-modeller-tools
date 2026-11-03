@@ -180,24 +180,25 @@ class ArtifactWriter:
 
 
 def _rows_to_xlsx(content: str) -> bytes:
-    """Content is JSON: {"<sheet name>": [{"<header>": value, ...}, ...]}. Headers come from the rows, in first-seen order."""
+    """Content is JSON {"sheets": [{"name", "headers", "rows"}]}. Exactly these sheets are written, in order, each with its
+    header row in the given order. A row key that is not one of the sheet's headers is refused."""
     try:
-        sheets = json.loads(content)
+        data = json.loads(content)
     except json.JSONDecodeError as e:
         raise WriterError(f"proposed_smx_xlsx content is not valid JSON: {e}") from e
-    if not isinstance(sheets, dict) or not all(isinstance(v, list) for v in sheets.values()):
-        raise WriterError('proposed_smx_xlsx content must be {"sheet": [row objects]}')
+    sheets = data.get("sheets") if isinstance(data, dict) else None
+    if not isinstance(sheets, list) or not sheets or not all(isinstance(s, dict) and isinstance(s.get("headers"), list) and isinstance(s.get("rows"), list) for s in sheets):
+        raise WriterError('proposed_smx_xlsx content must be {"sheets": [{"name": ..., "headers": [...], "rows": [...]}]}')
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
-    for title, rows in sheets.items():
-        ws = wb.create_sheet(str(title)[:31])
-        headers: list[str] = []
-        for row in rows:
-            for k in row:
-                if k not in headers:
-                    headers.append(k)
+    for sheet in sheets:
+        headers = [str(h) for h in sheet["headers"]]
+        ws = wb.create_sheet(str(sheet.get("name", ""))[:31])
         ws.append(headers)
-        for row in rows:
+        for row in sheet["rows"]:
+            extra = set(row) - set(headers)
+            if extra:
+                raise WriterError(f"sheet {sheet.get('name')!r}: row keys {sorted(extra)} are not headers {headers}")
             ws.append([row.get(h) for h in headers])
     buf = io.BytesIO()
     wb.save(buf)
