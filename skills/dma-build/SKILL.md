@@ -46,7 +46,20 @@ Each stage output, as submitted with `submit_stage` and shown to the modeller, h
 
 Use only approved earlier stage versions. If an earlier stage turns out wrong, ask the modeller to Disapprove with `reopen`; never change it yourself.
 
-### *1.4. Gate blocks*
+### *1.4. Rows for the SMX workbook*
+
+The final output is one workbook per model in the wave3 layout (`config/smx_template.yaml`). The server builds it only from the `smx_rows` of approved versions, so the stages that design tables also pass their rows to `submit_stage(..., smx_rows={"<sheet>": [{"<header>": value}]})`:
+
+| Stage | Sheets |
+|---|---|
+| `bronze_identification` | Bronze |
+| `silver_staging` | Silver - Staging |
+| `silver_idm` | Silver - IDM, Lookup |
+| `gold` | GOLD - SDM, Lookup, Report Table Mapping |
+
+Use the sheet and header names exactly as in the template. Show the same rows as a table in the stage output, so the modeller approves what will be written. Leave `Status` and `Reviewed Date` empty: approval stays with AGI reviewers. Never add the team tracking columns (PIC, Updated By and so on).
+
+### *1.5. Gate blocks*
 
 A normal stage ends with the `dma-review` gate block, using the stage number from the table:
 
@@ -96,7 +109,7 @@ Reply with one of: Approve, Suggest changes <comment>, or Disapprove <reason>.
 - Call `dbt_repo_status` once and show the commit and pull result.
 - For each source table, call `dbt_model_lookup`. Found: show the model path, rendered SQL and `unresolved` items, then `dbt_upstream` for the `ref()` / `source()` chain to Bronze. Several matches: list them and ask which applies. Not found: "no dbt model: data analysis" for that table.
 - Output: the Bronze table list with, per table, the dbt model it came from or "data analysis".
-- Submit with `submit_stage(..., bronze_tables=[...])` listing exactly those Bronze tables. Approving locks that list: it is the only list data extraction may sample.
+- Submit with `submit_stage(..., bronze_tables=[...], smx_rows={"Bronze": [...]})`: the Bronze tables, and one Bronze sheet row per table (schema, table name, source system, source database/schema, description). Approving locks that list: it is the only list data extraction may sample.
 - MAJOR GATE 1: Bronze table list.
 
 ### *2.6. Stage 6: Data extraction (`data_extraction`, OG 5.1)*
@@ -120,18 +133,21 @@ Reply with one of: Approve, Suggest changes <comment>, or Disapprove <reason>.
 
 - Close to Bronze with minor cleanup: renames, types, natural keys `_num`, metadata columns.
 - Where a dbt model was found, follow its logic and call out every difference. Where it went to data analysis, say what the design rests on.
+- Pass the columns as `smx_rows={"Silver - Staging": [...]}`, one row per column.
 - Gate 8.
 
 ### *2.9. Stage 9: Silver IDM (`silver_idm`, OG 9, MAJOR GATE 2)*
 
 - 3NF, hash keys `_id`, party key mapping. Mostly 1:1 with staging plus key mapping.
 - Output: the Silver schemas (staging and IDM), table by table, with keys and sources.
+- Pass the columns as `smx_rows={"Silver - IDM": [...]}`, plus `Lookup` rows for any lookup tables.
 - MAJOR GATE 2: Silver schemas. Approving locks the Silver layer Gold builds on.
 
 ### *2.10. Stage 10: Gold (`gold`, OG 11 and 12, MAJOR GATE 3)*
 
 - Facts and dimensions, keys-only facts, only the columns the report uses, Power Query aggregations moved here.
 - Grain check with `find_tables_by_grain` per table: same grain in another BU is a CDM promotion candidate; an aggregation of an existing fact is a view; otherwise a new table. Name the case for each table.
+- Pass `smx_rows` with `GOLD - SDM` (one row per column), `Lookup` rows if any, and `Report Table Mapping` (one row per Power BI table: PBI Report, PBI Table, the Gold table under Tables, the existing Redshift table if known, SMX). Leave `Status` and `Reviewed Date` empty.
 - MAJOR GATE 3: Gold models. Approving locks the design the rules pass checks.
 
 ### *2.11. Stage 11: Rules pass (`rules_pass`)*
@@ -146,7 +162,7 @@ The server refuses these before gate 11 is approved.
 
 1. `compile_report(session_id)`: report and decisions JSON from approved stages, the decision log and the permission log.
 2. `write_artifact(session_id=..., ...)`, built from approved stages only:
-   - `proposed_smx_xlsx` (OG 14): JSON `{"<sheet>": [rows]}` from the approved Silver and Gold stages. The official template is still open (Q1).
+   - `proposed_smx_xlsx` (OG 14) with empty `content`: the server writes one workbook with the six wave3 sheets from the approved `smx_rows`. Show any `notes` about sheets that have no rows.
    - `requirements_md` with empty `content`: the server writes the approved `requirements` version. Show any `notes` about missing headings.
    - `lineage_mermaid`: the `mermaid` text from the approved `report_lineage` or `lineage_diagram` output, unchanged.
 3. Report the returned paths. If a write is refused, show the error and ask; never retry around it.

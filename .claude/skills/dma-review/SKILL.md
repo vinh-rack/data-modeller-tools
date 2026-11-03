@@ -121,7 +121,7 @@ This step is not gated, because it runs only after gate 6 is approved. The serve
 
 1. Call `compile_report(session_id)`. It writes the report from the approved version of every stage plus the full decision log, and a decisions JSON. Superseded and disapproved versions appear only in the log.
 2. Call `write_artifact(..., session_id)` only for extras the modeller asked for, built from approved stage content only:
-   - `proposed_smx_xlsx`: JSON `{"<sheet name>": [row objects]}` using the same header names as the baseline sheet.
+   - Proposed SMX changes stay in the findings report. The SMX workbook (`proposed_smx_xlsx`) is written by build sessions only.
    - `lineage_mermaid`: only if lineage was discussed. Use the `mermaid` text from `lineage_diagram` or `report_lineage` as approved, never a hand-drawn diagram.
 3. Report the returned file paths. If a write is refused, show the error and ask how to proceed. Never retry with a different path to get around the refusal.
 
