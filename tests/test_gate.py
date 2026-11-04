@@ -470,3 +470,33 @@ def test_approved_smx_rows_only_from_approved_versions(out):
     assert [s["name"] for s in sheets] == ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
     gold = next(s for s in sheets if s["name"] == "GOLD - SDM")
     assert [r["column name"] for r in gold["rows"]] == ["booking_id"]
+
+
+# Table status at major gate 1.
+
+STATUS = {"raw_orders": "dbt_model_found", "raw_stores": "already_modelled", "store_targets": "missing", "refunds": "missing"}
+
+
+def test_table_status_recorded_and_locked(out):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    approve(store, sid, "scope")
+    v = store.submit(sid, "bronze_identification", "three groups", ["raw.raw_orders"], table_status=STATUS)
+    assert v.table_status == STATUS and store._load(sid).approved_table_status is None
+    store.decide(sid, "bronze_identification", 1, "approve")
+    assert store._load(sid).approved_table_status == STATUS
+
+
+@pytest.mark.parametrize("stage,status,match", [
+    ("scope", STATUS, "only accepted"),
+    ("bronze_identification", {}, "every table"),
+    ("bronze_identification", {"a": "found"}, "must be one of"),
+    ("bronze_identification", {"A": "missing", "a": "missing"}, "duplicate"),
+])
+def test_table_status_refused(out, stage, status, match):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    if stage == "bronze_identification":
+        approve(store, sid, "scope")
+    with pytest.raises(GateError, match=match):
+        store.submit(sid, stage, "x", table_status=status)

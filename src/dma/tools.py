@@ -350,9 +350,10 @@ class DmaTools:
         content: Annotated[str, Field(description="The full stage output shown to the modeller: output, evidence and assumptions.")],
         bronze_tables: Annotated[list[str] | None, Field(description="Only for stage bronze_identification: the Bronze tables this version proposes, e.g. raw.raw_orders. Approving the version locks the list that data extraction may sample.")] = None,
         smx_rows: Annotated[dict[str, list[dict[str, Any]]] | None, Field(description='Build stages only: rows for the output SMX workbook as {"<sheet>": [{"<header>": value}]}, using the sheet and header names of config/smx_template.yaml. Bronze on bronze_identification, Silver - Staging on silver_staging, Silver - IDM on silver_idm, GOLD - SDM and Report Table Mapping on gold, Lookup on silver_idm or gold. Leave Status and Reviewed Date empty.')] = None,
+        table_status: Annotated[dict[str, Literal["dbt_model_found", "already_modelled", "missing"]] | None, Field(description="Only for stage bronze_identification: every table the report uses, marked dbt_model_found, already_modelled or missing. Approving major gate 1 locks it.")] = None,
     ) -> StageVersion:
         try:
-            return self.gate.submit(session_id, stage, content, bronze_tables, smx_rows)
+            return self.gate.submit(session_id, stage, content, bronze_tables, smx_rows, table_status)
         except GateError as e:
             raise ToolError(str(e)) from e
 

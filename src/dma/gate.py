@@ -25,6 +25,8 @@ STAGE_KEYS = {"id", "label", "og_step", "major_gate", "template"}
 REQUIREMENTS_STAGE = "requirements"
 # The stage whose approved version fixes the Bronze tables that data extraction may sample (FR-B11).
 BRONZE_STAGE = "bronze_identification"
+# Major gate 1 sorts every table the report uses into one of these (architect, 2 Nov; FR-B9, D7).
+TABLE_STATUSES = ("dbt_model_found", "already_modelled", "missing")
 # Sampling needs a permission separate from any gate decision, given while the session is at this stage.
 EXTRACTION_STAGE = "data_extraction"
 PERMISSIONS = ("data_extraction",)
@@ -46,6 +48,7 @@ class StageVersion(BaseModel):
     submitted_at: str
     bronze_tables: list[str] | None = None
     smx_row_counts: dict[str, int] | None = None
+    table_status: dict[str, str] | None = None
 
 
 class StageState(BaseModel):
@@ -142,6 +145,13 @@ class _Session:
             return None
         return self.versions[BRONZE_STAGE][self.approved[BRONZE_STAGE] - 1].get("bronze_tables")
 
+    @property
+    def approved_table_status(self) -> dict[str, str] | None:
+        """Per report table, dbt_model_found, already_modelled or missing, from the approved bronze_identification version."""
+        if BRONZE_STAGE not in self.approved:
+            return None
+        return self.versions[BRONZE_STAGE][self.approved[BRONZE_STAGE] - 1].get("table_status")
+
 
 def _replay(events: list[dict[str, Any]]) -> _Session:
     if not events or events[0].get("type") != "session_started":
@@ -154,7 +164,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     for e in events[1:]:
         kind = e.get("type")
         if kind == "stage_submitted":
-            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"], "bronze_tables": e.get("bronze_tables"), "smx_rows": e.get("smx_rows")})
+            s.versions[e["stage"]].append({"version": e["version"], "status": "pending", "content": e["content"], "sha256": e["sha256"], "user": e["user"], "ts": e["ts"], "bronze_tables": e.get("bronze_tables"), "smx_rows": e.get("smx_rows"), "table_status": e.get("table_status")})
         elif kind == "decision":
             rec = s.versions[e["stage"]][e["version"] - 1]
             rec["status"] = VERSION_STATUS[e["decision"]]
@@ -180,7 +190,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
 
 def _version(v: dict[str, Any]) -> StageVersion:
     counts = {k: len(rows) for k, rows in (v.get("smx_rows") or {}).items()} or None
-    return StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"], bronze_tables=v.get("bronze_tables"), smx_row_counts=counts)
+    return StageVersion(version=v["version"], status=v["status"], sha256=v["sha256"], submitted_by=v["user"], submitted_at=v["ts"], bronze_tables=v.get("bronze_tables"), smx_row_counts=counts, table_status=v.get("table_status"))
 
 
 def _check_bronze(stage: str, tables: list[str]) -> list[str]:
@@ -192,6 +202,22 @@ def _check_bronze(stage: str, tables: list[str]) -> list[str]:
     if len({t.lower() for t in cleaned}) != len(cleaned):
         raise GateError(f"bronze_tables has duplicates: {cleaned}")
     return cleaned
+
+
+def _check_table_status(stage: str, status: dict[str, str]) -> dict[str, str]:
+    if stage != BRONZE_STAGE:
+        raise GateError(f"table_status is only accepted for stage {BRONZE_STAGE!r}, got stage {stage!r}")
+    if not isinstance(status, dict) or not status:
+        raise GateError("table_status must map every table the report uses to dbt_model_found, already_modelled or missing")
+    out: dict[str, str] = {}
+    for table, value in status.items():
+        name = str(table).strip()
+        if not name or name.lower() in {k.lower() for k in out}:
+            raise GateError(f"table_status has a blank or duplicate table name: {table!r}")
+        if value not in TABLE_STATUSES:
+            raise GateError(f"table_status[{name!r}] must be one of {list(TABLE_STATUSES)}, got {value!r}")
+        out[name] = value
+    return out
 
 
 def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
@@ -262,7 +288,7 @@ class GateStore:
         self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
         return self.view(session_id)
 
-    def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None, smx_rows: dict[str, list[dict[str, Any]]] | None = None) -> StageVersion:
+    def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None, smx_rows: dict[str, list[dict[str, Any]]] | None = None, table_status: dict[str, str] | None = None) -> StageVersion:
         s = self._load_active(session_id)
         if s.complete:
             raise GateError(f"every stage of session {session_id} is approved. Nothing more can be submitted.")
@@ -280,6 +306,8 @@ class GateStore:
         record: dict[str, Any] = {"type": "stage_submitted", "stage": stage, "version": len(s.versions[stage]) + 1, "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
         if bronze_tables is not None:
             record["bronze_tables"] = _check_bronze(stage, bronze_tables)
+        if table_status is not None:
+            record["table_status"] = _check_table_status(stage, table_status)
         if smx_rows is not None:
             record["smx_rows"] = self._check_smx_rows(stage, smx_rows)
             size += len(json.dumps(record["smx_rows"]).encode("utf-8"))
