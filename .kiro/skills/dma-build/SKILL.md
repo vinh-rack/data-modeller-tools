@@ -106,11 +106,28 @@ Reply with one of: Approve, Suggest changes <comment>, or Disapprove <reason>.
 
 ### *2.5. Stage 5: Bronze identification (`bronze_identification`, OG 4, MAJOR GATE 1)*
 
+This gate compares every table the report uses (the source tables from `legacy_entities`) against the dbt models and the existing SMX.
+
 - Call `dbt_repo_status` once and show the commit and pull result.
-- For each source table, call `dbt_model_lookup`. Found: show the model path, rendered SQL and `unresolved` items, then `dbt_upstream` for the `ref()` / `source()` chain to Bronze. Several matches: list them and ask which applies. Not found: "no dbt model: data analysis" for that table.
-- Output: the Bronze table list with, per table, the dbt model it came from or "data analysis".
-- Submit with `submit_stage(..., bronze_tables=[...], smx_rows={"Bronze": [...]})`: the Bronze tables, and one Bronze sheet row per table (schema, table name, source system, source database/schema, description). Approving locks that list: it is the only list data extraction may sample.
+- For each table, call `dbt_model_lookup` and `find_tables_by_bronze`, then put it in exactly one group:
+  - `dbt_model_found`: show the model path, rendered SQL and `unresolved` items, and `dbt_upstream` for the `ref()` / `source()` chain to Bronze. Several matches: list them and ask which applies.
+  - `already_modelled`: the existing SMX tables built from it.
+  - `missing`: no dbt model and not modelled.
+- Output: the three groups, and the Bronze table list with where each Bronze table came from.
+- Submit with `submit_stage(..., bronze_tables=[...], table_status={"<table>": "<group>"}, smx_rows={"Bronze": [...]})`: the Bronze tables, every table with its group, and one Bronze sheet row per Bronze table (schema, table name, source system, source database/schema, description). Approving locks the list and the groups.
+- In the gate block, list the missing tables and say you will ask about each one after approval.
 - MAJOR GATE 1: Bronze table list.
+
+### *2.5.1. Route per missing table*
+
+Right after major gate 1 is approved (the session is at `data_extraction`), ask for each missing table in plain words:
+
+"No dbt model for <table>. Should I do data analysis, or do you want to paste the dbt or SQL code?"
+
+- Only an explicit choice counts. Silence, "ok" or "either" means ask again.
+- Data analysis: `choose_missing_route(session_id, table, "data_analysis")`.
+- Own code: `choose_missing_route(session_id, table, "provided_code")`, then `provide_table_code(session_id, table, code, dialect)` with the code exactly as pasted. Show what it returns: rendered SQL, `unresolved`, and the Bronze tables tagged confirmed or inferred.
+- A choice can be changed until `reuse_check` is approved; the latest one counts. The server refuses `reuse_check` while any missing table has no route or no code.
 
 ### *2.6. Stage 6: Data extraction (`data_extraction`, OG 5.1)*
 
@@ -119,35 +136,41 @@ Reply with one of: Approve, Suggest changes <comment>, or Disapprove <reason>.
 3. Then call `sample_rows` per granted table. If it returns `not_available` (Phase 0 has no source connector), write the reason.
 4. If the modeller declines, or sampling is not available, the output says "skipped" with the reason, and data analysis is metadata only.
 5. Output: per table, what the samples show (types, formats, keys, nulls you can see in the rows), or "skipped" and why. Never compute or invent row counts, distinct counts or null rates beyond the rows shown. If the modeller withdraws permission, call `revoke_permission`.
+6. Samples are the only data a data-analysis route may use beyond metadata.
 - Gate 6. Approving this stage ends sampling for the session.
 
 ### *2.7. Stage 7: Reuse check (`reuse_check`, OG 6 and 7)*
 
-- Tools: `find_tables_by_bronze` per Bronze table.
+- Tools: `find_tables_by_bronze` per Bronze table, and `get_session` for each missing table's route (`missing_tables`).
 - Output, two lists:
   - Already modelled: the existing tables to reuse; check only missing columns.
-  - New: each table and its basis: dbt logic, data analysis from samples, or metadata only.
+  - New: each table and its basis: dbt logic, provided code, data analysis from samples, or metadata only.
+- For each missing table, cite its route exactly as `<table> (route: data_analysis)` or `<table> (route: provided)`; the server refuses the stage otherwise. Data-analysis logic is tagged `[inferred]`, and the modeller can use Suggest changes to replace it by code: call `choose_missing_route` and `provide_table_code`, then submit a new version.
 - Gate 7.
 
 ### *2.8. Stage 8: Silver Staging (`silver_staging`, OG 8)*
 
 - Close to Bronze with minor cleanup: renames, types, natural keys `_num`, metadata columns.
-- Where a dbt model was found, follow its logic and call out every difference. Where it went to data analysis, say what the design rests on.
-- Pass the columns as `smx_rows={"Silver - Staging": [...]}`, one row per column.
+- Where a dbt model was found, follow its logic and call out every difference. Provided code is followed the same way. Where it went to data analysis, say what the design rests on and tag that logic `[inferred]`.
+- Per column, show the rule or SQL expression and its source: `table.column`, dbt `file:line`, provided code, or data analysis. The same rule and source go into each `smx_rows={"Silver - Staging": [...]}` row; the server refuses rows without them.
+- Cite each missing table's route as in the reuse check.
 - Gate 8.
 
 ### *2.9. Stage 9: Silver IDM (`silver_idm`, OG 9, MAJOR GATE 2)*
 
 - 3NF, hash keys `_id`, party key mapping. Mostly 1:1 with staging plus key mapping.
 - Output: the Silver schemas (staging and IDM), table by table, with keys and sources.
-- Pass the columns as `smx_rows={"Silver - IDM": [...]}`, plus `Lookup` rows for any lookup tables.
+- Per column, the rule or SQL expression and its source, as in Silver Staging. Pass them as `smx_rows={"Silver - IDM": [...]}`, plus `Lookup` rows for any lookup tables. Cite each missing table's route.
+- This gate checks the transform logic is correct.
 - MAJOR GATE 2: Silver schemas. Approving locks the Silver layer Gold builds on.
 
 ### *2.10. Stage 10: Gold (`gold`, OG 11 and 12, MAJOR GATE 3)*
 
 - Facts and dimensions, keys-only facts, only the columns the report uses, Power Query aggregations moved here.
 - Grain check with `find_tables_by_grain` per table: same grain in another BU is a CDM promotion candidate; an aggregation of an existing fact is a view; otherwise a new table. Name the case for each table.
-- Pass `smx_rows` with `GOLD - SDM` (one row per column), `Lookup` rows if any, and `Report Table Mapping` (one row per Power BI table: PBI Report, PBI Table, the Gold table under Tables, the existing Redshift table if known, SMX). Leave `Status` and `Reviewed Date` empty.
+- Per column, the rule or SQL expression and its source, as in Silver Staging. Cite each missing table's route.
+- Pass `smx_rows` with `GOLD - SDM` (one row per column, rule and source filled), `Lookup` rows if any, and `Report Table Mapping` (one row per Power BI table: PBI Report, PBI Table, the Gold table under Tables, the existing Redshift table if known, SMX). Leave `Status` and `Reviewed Date` empty.
+- This gate checks the transform logic is correct.
 - MAJOR GATE 3: Gold models. Approving locks the design the rules pass checks.
 
 ### *2.11. Stage 11: Rules pass (`rules_pass`)*
