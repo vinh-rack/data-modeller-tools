@@ -5,13 +5,15 @@ from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Callable, Literal
 
+import sqlglot
 from mcp.server.mcpserver.exceptions import ToolError
+from sqlglot import exp
 from pydantic import BaseModel, Field
 
 from dma.config import Settings, load_gates, load_yaml
 from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
-from dma.gate import REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
+from dma.gate import CODE_DIALECTS, REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.diagram import Direction, LineageGraph, ReportLineage, report_lineage, table_lineage
@@ -68,12 +70,20 @@ class DbtModelDetail(BaseModel):
     refs: list[DbtRef]
     sources: list[DbtSourceRef]
     unresolved: list[Unresolved]
+    bronze_tables: list["BronzeCandidate"] = Field(default_factory=list, description="Provided code only: the Bronze tables it reads")
+
+
+class BronzeCandidate(BaseModel):
+    table: str
+    tag: Literal["confirmed", "inferred"] = Field(description="confirmed: a source() or ref() chain resolved in the dbt repo; inferred: a table named in plain SQL or an unknown source, for the modeller to confirm")
+    evidence: str
 
 
 class DbtLookup(BaseModel):
     query: str
     exists: bool
-    route: Literal["dbt_model", "data_analysis"]
+    origin: Literal["repo", "provided"] = "repo"
+    route: Literal["dbt_model", "data_analysis", "provided_code"]
     note: str
     models: list[DbtModelDetail]
 
@@ -108,6 +118,28 @@ class SessionList(BaseModel):
 class CompiledReport(BaseModel):
     session_id: str
     artifacts: list[WrittenArtifact]
+
+
+def _provided_bronze(repo: DbtRepo, r: Any, dialect: str, bronze_types: list[str]) -> list[BronzeCandidate]:
+    """Bronze tables a pasted model reads: resolved sources and ref chains are confirmed, anything else is inferred."""
+    found: dict[str, BronzeCandidate] = {}
+    for s in r.sources:
+        st = repo.sources.get((s.source.lower(), s.table.lower()))
+        rel = st.relation if st else f"{s.source}.{s.table}"
+        found.setdefault(rel, BronzeCandidate(table=rel, tag="confirmed" if st else "inferred", evidence=f"{r.path}:{s.line}"))
+    for ref in r.refs:
+        node = repo.model_node(ref.name, ref.version)
+        if node:
+            for b in repo.upstream(node.name, bronze_types, dialect).bronze_tables:
+                found.setdefault(b.table, BronzeCandidate(table=b.table, tag="confirmed", evidence=f"{r.path}:{ref.line} via {b.evidence}"))
+    if not r.sources and not r.refs and r.parses:
+        tree = sqlglot.parse_one(r.rendered_sql, read=dialect)
+        ctes = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE)}
+        for tb in tree.find_all(exp.Table):
+            name = ".".join(p for p in (tb.catalog, tb.db, tb.name) if p)
+            if name and name.lower() not in ctes and not name.startswith("__dma_"):
+                found.setdefault(name, BronzeCandidate(table=name, tag="inferred", evidence=f"{r.path}: table in plain SQL"))
+    return sorted(found.values(), key=lambda b: b.table)
 
 
 def _cell(text: str | None) -> str:
@@ -418,6 +450,34 @@ class DmaTools:
         except SamplingUnavailable as e:
             return SampleResult(session_id=session_id, table=name, limit=limit, status="not_available", reason=str(e))
         return SampleResult(session_id=session_id, table=name, limit=limit, status="ok", rows=rows)
+
+    def choose_missing_route(
+        self,
+        session_id: Annotated[str, Field(description="Session id, after major gate 1 and before reuse_check is approved.")],
+        table: Annotated[str, Field(description="A table marked missing in the approved bronze_identification table_status.")],
+        route: Annotated[Literal["data_analysis", "provided_code"], Field(description="The modeller's explicit choice: data_analysis, or provided_code to paste dbt or SQL code.")],
+    ) -> SessionView:
+        try:
+            return self.gate.choose_route(session_id, table, route)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+
+    def provide_table_code(
+        self,
+        session_id: Annotated[str, Field(description="Session id, after major gate 1 and before reuse_check is approved.")],
+        table: Annotated[str, Field(description="A missing table whose route is provided_code.")],
+        code: Annotated[str, Field(description="The dbt model or SQL the modeller pasted, exactly as given.")],
+        dialect: Annotated[Literal["redshift", "databricks", "spark"], Field(description="SQL dialect of the code. dbt Jinja is handled before parsing.")] = "databricks",
+    ) -> DbtLookup:
+        try:
+            name = self.gate.provide_code(session_id, table, code, dialect)
+        except GateError as e:
+            raise ToolError(str(e)) from e
+        repo = self.dbt_repo if self.settings.dbt_repo is not None else DbtRepo.empty()
+        r = repo.render_text(name, f"provided:{name}", code, dialect)
+        detail = DbtModelDetail(name=name, match="provided", path=r.path, alias=None, relation=name, description=None, columns=[], raw_sql=r.raw_sql, rendered_sql=r.rendered_sql, parses=r.parses, parse_error=r.parse_error, refs=r.refs, sources=r.sources, unresolved=r.unresolved, bronze_tables=_provided_bronze(repo, r, dialect, list(self.dbt_cfg.get("bronze_resource_types", ["source"]))))
+        note = f"Code for {name!r} is logged in the session. Its Bronze tables come from source() and resolved ref() (confirmed) or from table names in plain SQL (inferred); confirm them with the modeller."
+        return DbtLookup(query=name, exists=True, origin="provided", route="provided_code", note=note, models=[detail])
 
     def compile_report(self, session_id: Annotated[str, Field(description="Session whose final stage is approved.")]) -> CompiledReport:
         try:

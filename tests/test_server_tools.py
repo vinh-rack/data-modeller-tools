@@ -8,7 +8,7 @@ from dma.config import load_settings
 from dma.server import build_server
 from dma.tools import DmaTools
 
-WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "grant_permission", "revoke_permission", "compile_report", "write_artifact"}
+WRITE_TOOLS = {"start_session", "submit_stage", "record_decision", "grant_permission", "revoke_permission", "choose_missing_route", "provide_table_code", "compile_report", "write_artifact"}
 EXPECTED_TOOLS = {"list_models", "get_model", "find_tables_by_bronze", "find_tables_by_grain", "run_rules", "dbt_model_lookup", "dbt_upstream", "dbt_repo_status", "sql_column_lineage", "get_session", "list_sessions", "list_kb", "read_kb", "get_report_map", "lineage_diagram", "report_lineage", "sample_rows", "pbi_get_report", "pbi_model_metadata"} | WRITE_TOOLS
 
 
@@ -398,3 +398,52 @@ async def test_smx_workbook_from_approved_stages_only(server):
     assert rows["Lookup"] == [template["Lookup"]] and "Lookup" in ok["notes"][0]
     rtm = dict(zip(template["Report Table Mapping"], rows["Report Table Mapping"][1]))
     assert rtm["PBI Table"] == "Orders" and rtm["Status"] is None and rtm["Reviewed Date"] is None
+
+
+STATUS = {"raw_a": "dbt_model_found", "raw_stores": "already_modelled", "store_targets": "missing", "refunds": "missing"}
+DBT_CODE = "{{ config(materialized='table') }}\nselect a.a_id, {{ cents('amt') }} as amt\nfrom {{ ref('stg_a') }} as a\njoin {{ source('shop', 'raw_b') }} as b on a.a_id = b.a_id\n"
+PLAIN_SQL = "with t as (select * from raw.store_targets_extract)\nselect t.store_id, t.target from t join raw.stores s on s.id = t.store_id"
+
+
+async def build_to_routes(c):
+    sid = (await c.call_tool("start_session", {"flow": "build", "scope": "report R"})).structured_content["session_id"]
+    view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
+    for st in [s["stage"] for s in view["stages"]][:6]:
+        args = {"session_id": sid, "stage": st, "content": f"APPROVED {st}"}
+        if st == "bronze_identification":
+            args.update(bronze_tables=["raw.raw_a"], table_status=STATUS)
+        v = (await c.call_tool("submit_stage", args)).structured_content["version"]
+        await c.call_tool("record_decision", {"session_id": sid, "stage": st, "version": v, "decision": "approve"})
+    return sid
+
+
+@pytest.mark.anyio
+async def test_provide_table_code_refusals_and_plain_sql(server):
+    async with Client(server) as c:
+        sid = await build_to_routes(c)
+        found = await c.call_tool("provide_table_code", {"session_id": sid, "table": "raw_a", "code": "select 1", "dialect": "databricks"})
+        no_route = await c.call_tool("provide_table_code", {"session_id": sid, "table": "store_targets", "code": "select 1", "dialect": "databricks"})
+        await c.call_tool("choose_missing_route", {"session_id": sid, "table": "store_targets", "route": "provided_code"})
+        await c.call_tool("choose_missing_route", {"session_id": sid, "table": "refunds", "route": "data_analysis"})
+        bad = await c.call_tool("choose_missing_route", {"session_id": sid, "table": "raw_stores", "route": "data_analysis"})
+        r = (await c.call_tool("provide_table_code", {"session_id": sid, "table": "store_targets", "code": PLAIN_SQL, "dialect": "databricks"})).structured_content
+        view = (await c.call_tool("get_session", {"session_id": sid})).structured_content
+    assert found.is_error and "dbt_model_found" in found.content[0].text
+    assert no_route.is_error and "provided_code" in no_route.content[0].text
+    assert bad.is_error and "already_modelled" in bad.content[0].text
+    m = r["models"][0]
+    assert (r["origin"], r["route"], m["path"], m["parses"]) == ("provided", "provided_code", "provided:store_targets", True)
+    assert [(b["table"], b["tag"]) for b in m["bronze_tables"]] == [("raw.store_targets_extract", "inferred"), ("raw.stores", "inferred")]
+    assert {x["table"]: (x["route"], x["code_provided"]) for x in view["missing_tables"]} == {"store_targets": ("provided_code", True), "refunds": ("data_analysis", False)}
+
+
+@pytest.mark.anyio
+async def test_provide_table_code_parses_dbt_with_the_repo(dbt_server):
+    async with Client(dbt_server) as c:
+        sid = await build_to_routes(c)
+        await c.call_tool("choose_missing_route", {"session_id": sid, "table": "store_targets", "route": "provided_code"})
+        r = (await c.call_tool("provide_table_code", {"session_id": sid, "table": "store_targets", "code": DBT_CODE, "dialect": "databricks"})).structured_content
+    m = r["models"][0]
+    assert "{{" not in m["rendered_sql"] and "from stg_a as a" in m["rendered_sql"] and m["parses"]
+    assert [u["kind"] for u in m["unresolved"]] == ["jinja_expression"]
+    assert [(b["table"], b["tag"]) for b in m["bronze_tables"]] == [("raw.raw_a", "confirmed"), ("raw.raw_b", "confirmed")]

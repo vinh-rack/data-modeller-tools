@@ -49,6 +49,8 @@ TOOLS = [
     ("grant_permission", "Log the modeller's explicit permission to sample data (data_extraction) for listed tables from the approved Bronze list. Only at stage data_extraction, never on the modeller's behalf.", WRITES_OUTPUT),
     ("revoke_permission", "Log the end of a data_extraction permission. Sampling stops at once.", WRITES_OUTPUT),
     ("sample_rows", "Return up to 20 sample rows of one granted Bronze table for the data_extraction stage. Refused without a logged permission. Phase 0 has no source connector, so it returns not_available. Rows are never written to disk.", READS_SOURCE),
+    ("choose_missing_route", "Log the modeller's explicit route for a table marked missing at major gate 1: data_analysis, or provided_code to paste code. Only after major gate 1 and before reuse_check is approved.", WRITES_OUTPUT),
+    ("provide_table_code", "Log dbt or SQL code the modeller pasted for a missing table with route provided_code, and parse it like a dbt model (refs, sources, Jinja stripped, unresolved recorded) to find its Bronze tables. Returns the dbt_model_lookup shape with origin provided.", WRITES_OUTPUT),
     ("compile_report", "After the final stage is approved, write the report and decisions artifacts from approved stage outputs plus the full decision log.", WRITES_OUTPUT),
     ("write_artifact", "Write a new artifact into the output folder for a session whose final stage is approved. Never overwrites and never writes anywhere else.", WRITES_OUTPUT),
 ]
