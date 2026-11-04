@@ -565,3 +565,51 @@ def test_routes_refused_before_gate_1_and_cleared_on_reopen(out):
     v = store.submit(sid, "data_extraction", "skipped").version
     store.decide(sid, "data_extraction", v, "disapprove", "wrong list", then="reopen", reopen_stage="bronze_identification")
     assert store.view(sid).missing_tables == []
+
+
+# Routes must be chosen before the reuse check and cited at the later stages; Silver and Gold rows need rule and source.
+
+
+def real_at_routes(out):
+    store = real_store(out)
+    sid = store.start("build", "report R").session_id
+    for st in store.flows["build"][:5]:
+        args = {"bronze_tables": ["raw.raw_orders"], "table_status": STATUS} if st == "bronze_identification" else {}
+        v = store.submit(sid, st, f"APPROVED {st}", **args).version
+        store.decide(sid, st, v, "approve")
+    approve(store, sid, "data_extraction")
+    return store, sid
+
+
+def test_reuse_check_needs_routes_and_code(out):
+    store, sid = real_at_routes(out)
+    with pytest.raises(GateError, match="need a route"):
+        store.submit(sid, "reuse_check", "store_targets (route: provided), refunds (route: data_analysis)")
+    store.choose_route(sid, "store_targets", "provided_code")
+    store.choose_route(sid, "refunds", "data_analysis")
+    with pytest.raises(GateError, match="need their code"):
+        store.submit(sid, "reuse_check", "store_targets (route: provided), refunds (route: data_analysis)")
+    store.provide_code(sid, "store_targets", "select 1 as target", "databricks")
+    assert store.submit(sid, "reuse_check", "Store_Targets (Route: Provided), refunds (route: data_analysis)").version == 1
+
+
+def test_silver_stage_must_cite_routes(out):
+    store, sid = real_at_routes(out)
+    store.choose_route(sid, "store_targets", "provided_code")
+    store.provide_code(sid, "store_targets", "select 1", "spark")
+    store.choose_route(sid, "refunds", "data_analysis")
+    approve(store, sid, "reuse_check", "store_targets (route: provided), refunds (route: data_analysis)")
+    with pytest.raises(GateError, match=r"refunds \(route: data_analysis\)"):
+        store.submit(sid, "silver_staging", "store_targets (route: provided) only")
+    assert store.submit(sid, "silver_staging", "store_targets (route: provided); refunds (route: data_analysis) [inferred]").version == 1
+
+
+@pytest.mark.parametrize("row", [
+    {"target table": "orders", "target column name": "order_num", "source table name": "raw.raw_orders", "source column name": "id"},
+    {"target table": "orders", "target column name": "order_num", "join/rule/filter applied": "pk", "source column name": "id"},
+])
+def test_silver_rows_need_rule_and_source(out, row):
+    store = real_store(out)
+    sid = build_at(store, "silver_staging")
+    with pytest.raises(GateError, match="rule and source"):
+        store.submit(sid, "silver_staging", "staging", smx_rows={"Silver - Staging": [row]})

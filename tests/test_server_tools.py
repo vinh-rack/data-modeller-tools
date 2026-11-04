@@ -377,7 +377,7 @@ async def run_build(c, gold_first=None):
 async def test_smx_workbook_from_approved_stages_only(server):
     import openpyxl
 
-    superseded = {"GOLD - SDM": [{"schema name": "gold_shop", "table name": "SUPERSEDED", "column name": "x"}]}
+    superseded = {"GOLD - SDM": [{"schema name": "gold_shop", "table name": "SUPERSEDED", "column name": "x", "source table": "slvr_cdm.orders", "source column": "x", "rules": "1:1 mapping"}]}
     async with Client(server) as c:
         sid = await run_build(c, gold_first=superseded)
         with_content = await c.call_tool("write_artifact", {"kind": "proposed_smx_xlsx", "name": "m", "content": "{}", "session_id": sid})

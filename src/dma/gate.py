@@ -32,6 +32,9 @@ ROUTES = ("data_analysis", "provided_code")
 ROUTE_STAGES = ("data_extraction", "reuse_check")
 CODE_DIALECTS = ("redshift", "databricks", "spark")
 MAX_CODE_BYTES = 200_000
+# Stages whose output must cite each missing table's route, as "<table> (route: data_analysis)" or "<table> (route: provided)".
+CITE_STAGES = ("reuse_check", "silver_staging", "silver_idm", "gold")
+ROUTE_WORDS = {"data_analysis": "data_analysis", "provided_code": "provided"}
 # Sampling needs a permission separate from any gate decision, given while the session is at this stage.
 EXTRACTION_STAGE = "data_extraction"
 PERMISSIONS = ("data_extraction",)
@@ -333,6 +336,7 @@ class GateStore:
         size = len(content.encode("utf-8"))
         if size > self.max_content_bytes:
             raise GateError(f"content is {size} bytes, the limit is {self.max_content_bytes}")
+        self._check_routes(s, stage, content)
         record: dict[str, Any] = {"type": "stage_submitted", "stage": stage, "version": len(s.versions[stage]) + 1, "content": content, "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
         if bronze_tables is not None:
             record["bronze_tables"] = _check_bronze(stage, bronze_tables)
@@ -465,6 +469,23 @@ class GateStore:
             raise GateError(f"table {table!r} is not in the currently approved Bronze list")
         return granted[key]
 
+    def _check_routes(self, s: _Session, stage: str, content: str) -> None:
+        """Missing tables need a chosen route before the reuse check, and later stages must cite it (FR-B9, D7)."""
+        if stage not in CITE_STAGES:
+            return
+        missing = [t for t, st in (s.approved_table_status or {}).items() if st == "missing"]
+        if not missing:
+            return
+        if stage == ROUTE_STAGES[-1]:
+            no_route = [t for t in missing if t not in s.routes]
+            no_code = [t for t in missing if s.routes.get(t, {}).get("route") == "provided_code" and not s.routes[t].get("code")]
+            if no_route or no_code:
+                raise GateError(f"before {stage!r}: missing tables need a route (choose_missing_route): {no_route}; provided_code tables need their code (provide_table_code): {no_code}")
+        text = content.lower()
+        uncited = [f"{t} (route: {ROUTE_WORDS[s.routes[t]['route']]})" for t in missing if t in s.routes and f"{t} (route: {ROUTE_WORDS[s.routes[t]['route']]})".lower() not in text]
+        if uncited:
+            raise GateError(f"stage {stage!r} must cite each missing table's route as evidence, missing: {uncited}")
+
     def _check_smx_rows(self, stage: str, smx_rows: dict[str, list[dict[str, Any]]]) -> dict[str, list[dict[str, Any]]]:
         """Rows for the output workbook, checked against config/smx_template.yaml and stored with the template's spelling."""
         if not isinstance(smx_rows, dict) or not smx_rows:
@@ -495,6 +516,10 @@ class GateStore:
                     if h in empty and v not in (None, ""):
                         raise GateError(f"{sheet['name']} row {i}: {h!r} stays empty; approval stays with AGI reviewers")
                     rec[h] = v
+                needed = [sheet["rule_header"], *sheet.get("source_headers", [])] if sheet.get("rule_header") else []
+                blank = [h for h in needed if rec.get(h) in (None, "")]
+                if blank:
+                    raise GateError(f"{sheet['name']} row {i}: every column needs its rule and source (major gates 2 and 3 check the transform logic); fill {blank}")
                 clean.append(rec)
             out[sheet["name"]] = clean
         return out
