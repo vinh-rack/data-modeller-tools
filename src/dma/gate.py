@@ -27,6 +27,11 @@ REQUIREMENTS_STAGE = "requirements"
 BRONZE_STAGE = "bronze_identification"
 # Major gate 1 sorts every table the report uses into one of these (architect, 2 Nov; FR-B9, D7).
 TABLE_STATUSES = ("dbt_model_found", "already_modelled", "missing")
+# The modeller picks one route per missing table, after major gate 1 and before the reuse check is approved.
+ROUTES = ("data_analysis", "provided_code")
+ROUTE_STAGES = ("data_extraction", "reuse_check")
+CODE_DIALECTS = ("redshift", "databricks", "spark")
+MAX_CODE_BYTES = 200_000
 # Sampling needs a permission separate from any gate decision, given while the session is at this stage.
 EXTRACTION_STAGE = "data_extraction"
 PERMISSIONS = ("data_extraction",)
@@ -84,6 +89,16 @@ class PermissionEntry(BaseModel):
     ts: str
 
 
+class MissingTable(BaseModel):
+    table: str
+    route: Literal["data_analysis", "provided_code"] | None = None
+    code_provided: bool = False
+    dialect: str | None = None
+    sha256: str | None = None
+    chosen_by: str | None = None
+    chosen_at: str | None = None
+
+
 class SessionView(BaseModel):
     session_id: str
     flow: str
@@ -97,6 +112,7 @@ class SessionView(BaseModel):
     decision_log: list[LogEntry]
     permissions: list[PermissionEntry] = []
     granted_tables: list[str] | None = None
+    missing_tables: list[MissingTable] = []
     artifacts: list[str]
 
 
@@ -123,6 +139,7 @@ class _Session:
     log: list[dict[str, Any]] = field(default_factory=list)
     permission_log: list[dict[str, Any]] = field(default_factory=list)
     grant: list[str] | None = None
+    routes: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
     ended: bool = False
 
@@ -172,9 +189,16 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
                 s.approved[e["stage"]] = e["version"]
             for stage in e.get("invalidated", []):
                 s.versions[stage][s.approved.pop(stage) - 1]["status"] = "invalidated"
+            if BRONZE_STAGE in e.get("invalidated", []):
+                # A reopened Bronze gate can change which tables are missing, so their routes and code start over.
+                s.routes.clear()
             if e.get("then") == "end":
                 s.ended = True
             s.log.append(e)
+        elif kind == "route_chosen":
+            s.routes[e["table"]] = {"route": e["route"], "user": e["user"], "ts": e["ts"]}
+        elif kind == "code_provided":
+            s.routes[e["table"]].update({"code": e["code"], "dialect": e["dialect"], "sha256": e["sha256"]})
         elif kind == "permission_granted":
             s.grant = list(e["tables"])
             s.permission_log.append(e)
@@ -186,6 +210,12 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
         else:
             raise GateError(f"session log is corrupt: unknown event type {kind!r}")
     return s
+
+
+def _missing_view(table: str, r: dict[str, Any] | None) -> MissingTable:
+    if not r:
+        return MissingTable(table=table)
+    return MissingTable(table=table, route=r["route"], code_provided=bool(r.get("code")), dialect=r.get("dialect"), sha256=r.get("sha256"), chosen_by=r["user"], chosen_at=r["ts"])
 
 
 def _version(v: dict[str, Any]) -> StageVersion:
@@ -381,6 +411,45 @@ class GateStore:
         self._append(session_id, {"type": "permission_revoked", "permission": permission, "tables": s.grant})
         return self.view(session_id)
 
+    def _missing_table(self, s: _Session, table: str) -> str:
+        """The approved name of a table marked missing at major gate 1, while routes may still be recorded."""
+        if s.next_stage not in ROUTE_STAGES or BRONZE_STAGE not in s.stages:
+            raise GateError(f"routes and code for missing tables are recorded after major gate 1 ({BRONZE_STAGE}) and before {ROUTE_STAGES[-1]!r} is approved; the current stage is {s.next_stage!r}")
+        status = s.approved_table_status
+        if not status:
+            raise GateError(f"the approved {BRONZE_STAGE} version has no table_status, so no table is marked missing")
+        by_key = {k.lower(): k for k in status}
+        name = by_key.get((table or "").strip().lower())
+        if name is None:
+            raise GateError(f"table {table!r} is not in the approved table_status: {sorted(status)}")
+        if status[name] != "missing":
+            raise GateError(f"table {name!r} is {status[name]}, not missing; only missing tables take a route or code")
+        return name
+
+    def choose_route(self, session_id: str, table: str, route: str) -> SessionView:
+        s = self._load_active(session_id)
+        if route not in ROUTES:
+            raise GateError(f"route must be one of {list(ROUTES)}, got {route!r}")
+        name = self._missing_table(s, table)
+        self._append(session_id, {"type": "route_chosen", "table": name, "route": route})
+        return self.view(session_id)
+
+    def provide_code(self, session_id: str, table: str, code: str, dialect: str) -> str:
+        """Log code the modeller pasted for a missing table. Returns the table's approved name; parsing is the caller's job."""
+        s = self._load_active(session_id)
+        name = self._missing_table(s, table)
+        if s.routes.get(name, {}).get("route") != "provided_code":
+            raise GateError(f"choose route provided_code for {name!r} before giving its code")
+        if dialect not in CODE_DIALECTS:
+            raise GateError(f"dialect must be one of {list(CODE_DIALECTS)}, got {dialect!r}")
+        if not code or not code.strip():
+            raise GateError("code is required: the dbt model or SQL for this table")
+        size = len(code.encode("utf-8"))
+        if size > MAX_CODE_BYTES:
+            raise GateError(f"code is {size} bytes, the limit is {MAX_CODE_BYTES}")
+        self._append(session_id, {"type": "code_provided", "table": name, "dialect": dialect, "sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(), "code": code})
+        return name
+
     def require_sampling(self, session_id: str, table: str) -> str:
         """The table's approved name if sampling it is allowed now, else GateError. Never samples anything itself."""
         s = self._load_active(session_id)
@@ -491,6 +560,7 @@ class GateStore:
             current_stage=current, stages=stages, allowed_next=allowed, decision_log=log, artifacts=s.artifacts,
             permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"]) for e in s.permission_log],
             granted_tables=s.grant,
+            missing_tables=[_missing_view(t, s.routes.get(t)) for t, st in (s.approved_table_status or {}).items() if st == "missing"],
         )
 
     def list_sessions(self) -> list[SessionSummary]:

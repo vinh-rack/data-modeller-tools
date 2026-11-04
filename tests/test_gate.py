@@ -500,3 +500,68 @@ def test_table_status_refused(out, stage, status, match):
         approve(store, sid, "scope")
     with pytest.raises(GateError, match=match):
         store.submit(sid, stage, "x", table_status=status)
+
+
+# Routes and code for missing tables.
+
+
+def at_routes(out):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    approve(store, sid, "scope")
+    v = store.submit(sid, "bronze_identification", "groups", ["raw.raw_orders"], table_status=STATUS).version
+    store.decide(sid, "bronze_identification", v, "approve")
+    return store, sid
+
+
+def test_routes_and_code_logged_and_replayed(out):
+    store, sid = at_routes(out)
+    store.choose_route(sid, "STORE_TARGETS", "provided_code")
+    store.provide_code(sid, "store_targets", "select 1 as x", "databricks")
+    store.choose_route(sid, "refunds", "data_analysis")
+    view = bronze_store(out).view(sid)
+    by = {m.table: m for m in view.missing_tables}
+    assert (by["store_targets"].route, by["store_targets"].code_provided, by["store_targets"].dialect) == ("provided_code", True, "databricks")
+    assert (by["refunds"].route, by["refunds"].code_provided) == ("data_analysis", False)
+    events = [json.loads(line) for line in (out / ".sessions" / sid / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    code = next(e for e in events if e["type"] == "code_provided")
+    assert code["code"] == "select 1 as x" and len(code["sha256"]) == 64 and code["user"] == "t"
+
+
+def test_switching_route_drops_the_code(out):
+    store, sid = at_routes(out)
+    store.choose_route(sid, "store_targets", "provided_code")
+    store.provide_code(sid, "store_targets", "select 1", "spark")
+    store.choose_route(sid, "store_targets", "data_analysis")
+    m = next(m for m in store.view(sid).missing_tables if m.table == "store_targets")
+    assert (m.route, m.code_provided) == ("data_analysis", False)
+
+
+@pytest.mark.parametrize("table,match", [("raw_orders", "dbt_model_found"), ("raw_stores", "already_modelled"), ("nope", "not in the approved")])
+def test_route_refused_for_tables_not_missing(out, table, match):
+    store, sid = at_routes(out)
+    with pytest.raises(GateError, match=match):
+        store.choose_route(sid, table, "data_analysis")
+
+
+def test_code_needs_provided_code_route_and_valid_input(out):
+    store, sid = at_routes(out)
+    with pytest.raises(GateError, match="choose route provided_code"):
+        store.provide_code(sid, "store_targets", "select 1", "databricks")
+    store.choose_route(sid, "store_targets", "provided_code")
+    with pytest.raises(GateError, match="dialect"):
+        store.provide_code(sid, "store_targets", "select 1", "postgres")
+    with pytest.raises(GateError, match="required"):
+        store.provide_code(sid, "store_targets", "  ", "databricks")
+
+
+def test_routes_refused_before_gate_1_and_cleared_on_reopen(out):
+    store = bronze_store(out)
+    sid = store.start("build", "r").session_id
+    with pytest.raises(GateError, match="after major gate 1"):
+        store.choose_route(sid, "store_targets", "data_analysis")
+    store, sid = at_routes(out)
+    store.choose_route(sid, "refunds", "data_analysis")
+    v = store.submit(sid, "data_extraction", "skipped").version
+    store.decide(sid, "data_extraction", v, "disapprove", "wrong list", then="reopen", reopen_stage="bronze_identification")
+    assert store.view(sid).missing_tables == []
