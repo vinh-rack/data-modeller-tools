@@ -153,3 +153,13 @@ def test_seeds_as_bronze_on_and_off(repo):
     on = repo.upstream("from_seed", ["source", "seed"])
     assert off.bronze_tables == [] and off.seeds == ["seed_x"]
     assert [(b.table, b.unique_id) for b in on.bronze_tables] == [("seed_x", "seed.shop_pkg.seed_x")] and on.seeds == []
+
+
+
+def test_render_text_resolves_against_the_repo_or_reports_missing(repo):
+    code = "{{ config(alias='x') }}\nselect a.a_id, {{ cents('amt') }} as amt\nfrom {{ ref('stg_a') }} as a\njoin {{ source('shop', 'raw_b') }} as b on a.a_id = b.a_id\n"
+    r = repo.render_text("pasted", "provided:pasted", code)
+    assert "from stg_a as a" in r.rendered_sql and "join raw.raw_b as b" in r.rendered_sql and r.parses
+    assert [u.kind for u in r.unresolved] == ["jinja_expression"] and r.unresolved[0].path == "provided:pasted"
+    bare = DbtRepo.empty().render_text("pasted", "provided:pasted", code)
+    assert [u.kind for u in bare.unresolved] == ["jinja_expression", "missing_ref", "missing_source"] and bare.parses

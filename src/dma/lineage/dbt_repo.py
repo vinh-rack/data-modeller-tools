@@ -120,6 +120,11 @@ class DbtRepo:
         self.latest = latest
         self.problems = problems
 
+    @classmethod
+    def empty(cls) -> "DbtRepo":
+        """A repo with nothing in it, for rendering pasted code when DMA_DBT_REPO is not set."""
+        return cls(Path("."), {}, {}, {}, {}, {}, {}, [])
+
     @property
     def name(self) -> str | None:
         return self.project.get("name")
@@ -244,11 +249,15 @@ class DbtRepo:
 
     def render(self, model: DbtModel, dialect: str = "databricks") -> RenderedModel:
         """Extract ref() and source() and turn the model into plain SQL for SQLGlot, without a Jinja engine."""
-        raw = self.raw_sql(model)
+        return self.render_text(model.name, model.path, self.raw_sql(model), dialect)
+
+    def render_text(self, name: str, path: str, raw: str, dialect: str = "databricks") -> RenderedModel:
+        """The same rendering for SQL text that is not a file in this repo, such as code the modeller pastes.
+        Refs and sources resolve against this repo; with an empty repo every ref and source is reported as missing."""
         unresolved: list[Unresolved] = []
 
         def note(kind: str, text: str, line: int) -> None:
-            unresolved.append(Unresolved(kind=kind, text=" ".join(text.split())[:200], path=model.path, line=line))
+            unresolved.append(Unresolved(kind=kind, text=" ".join(text.split())[:200], path=path, line=line))
 
         # Jinja comments go first, so a commented-out ref() is not counted. Removed text keeps its newlines.
         text = _COMMENT.sub(lambda m: _blank(m.group(0)), raw)
@@ -298,7 +307,7 @@ class DbtRepo:
             parses, error = True, None
         except SqlglotError as e:
             parses, error = False, str(e).splitlines()[0][:300]
-        return RenderedModel(name=model.name, path=model.path, raw_sql=raw, rendered_sql=rendered, refs=refs, sources=sources, unresolved=sorted(unresolved, key=lambda u: u.line), parses=parses, parse_error=error)
+        return RenderedModel(name=name, path=path, raw_sql=raw, rendered_sql=rendered, refs=refs, sources=sources, unresolved=sorted(unresolved, key=lambda u: u.line), parses=parses, parse_error=error)
 
     @staticmethod
     def _apply_model_yaml(m: dict[str, Any], models: dict[str, DbtModel], versions: dict[str, dict[int, str]], latest: dict[str, int]) -> None:
