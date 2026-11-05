@@ -17,7 +17,7 @@ uv run pytest
 uv run python scripts/smoke_client.py
 ```
 
-The smoke client starts `dma-server` over stdio, lists the 26 tools, runs `run_rules` on the synthetic fixture model, and runs one 11-stage build session to final approval in a temp folder, with sampling permission declined, then writes the XLSX, the requirement document and the lineage. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
+The smoke client starts `dma-server` over stdio, lists the 28 tools, runs `run_rules` on the synthetic fixture model, and runs one 11-stage build session to final approval in a temp folder, with sampling permission declined and one missing table per route, then writes the XLSX, the requirement document and the lineage. To check the server on its own, run `uv run dma-server`. It waits silently on stdin, so press Ctrl+C to stop it.
 
 To see what every tool does, run `uv run python scripts/tool_gallery.py`. It calls the SMX, knowledge base, lineage and gate tools on the fixtures (the tools that read Power BI need a live token, so they are left out) and writes `output/tool_gallery.html`, showing each tool's input, a readable view of its output and the raw JSON.
 
@@ -101,12 +101,14 @@ This copies them into `.claude/skills/` and `.kiro/skills/`. `tests/test_skills_
 | `pbi_get_report` | no | Reads a Power BI report, its semantic model and its data sources by ID |
 | `pbi_model_metadata` | no | Lists the semantic model's tables, columns, measures and M transforms, with the routes tried |
 | `start_session` | gate log | Starts a gated `review`, `build` or `lineage` session and returns its stages |
-| `submit_stage` | gate log | Records the next stage's output as a new version. On `bronze_identification` it also takes the `bronze_tables` list, and on the build design stages the `smx_rows` for the workbook |
+| `submit_stage` | gate log | Records the next stage's output as a new version. On `bronze_identification` it also takes the `bronze_tables` list and the `table_status` per report table, and on the build design stages the `smx_rows` for the workbook |
 | `record_decision` | gate log | Records `approve`, `suggest_changes` (comment) or `disapprove` (reason, then `redo`, `reopen` or `end`) |
 | `get_session` | no | Shows the current stage, versions, decision log and what is allowed next |
 | `list_sessions` | no | Lists gate sessions so one can be resumed |
 | `grant_permission` | gate log | Logs the modeller's `data_extraction` permission for tables from the approved Bronze list, only at stage `data_extraction` |
 | `revoke_permission` | gate log | Logs the end of that permission; sampling stops at once |
+| `choose_missing_route` | gate log | Logs the modeller's route for a missing table: `data_analysis` or `provided_code` |
+| `provide_table_code` | gate log | Logs the dbt or SQL code pasted for a missing table and parses it like a dbt model, returning its Bronze tables |
 | `sample_rows` | no | Up to 20 rows of a granted Bronze table, only with a logged permission. A stub in Phase 0: returns `not_available` |
 | `compile_report` | `output/` only | After final approval, writes the report and decisions files from approved stages plus the decision and permission logs |
 | `write_artifact` | `output/` only | After final approval, writes `findings_md`, `decisions_json` or `lineage_mermaid`, or the server-built `proposed_smx_xlsx` (build only) and `requirements_md`, as a new file |
@@ -182,6 +184,15 @@ The build flow follows the original 14-step flow of 2 Nov (REQUIREMENTS D5). Eve
 | 11 | `rules_pass` | | |
 
 Build sessions started before this change keep their 8 stages and still run.
+
+**Gate meanings (D7).** Major gate 1 compares every table the report uses against the dbt models and the existing SMX and puts it in one group: `dbt_model_found`, `already_modelled` or `missing` (`submit_stage(..., table_status={...})`). Major gates 2 and 3 check the transform logic: every Silver Staging, Silver IDM and Gold row in `smx_rows` must fill its rule and source columns, or the submit is refused.
+
+**Missing tables (FR-B9).** After major gate 1 and before the reuse check is approved, the modeller picks a route per missing table, logged by `choose_missing_route`:
+
+- `data_analysis`: the agent proposes the logic from metadata, plus `sample_rows` results only if data extraction was permitted, tagged `[inferred]`. No profiling numbers are invented.
+- `provided_code`: the modeller pastes dbt or SQL code, logged by `provide_table_code` with its hash. It is parsed with the dbt reader (refs, sources, Jinja stripped, unresolved recorded) and SQLGlot. Refs and sources that resolve in `DMA_DBT_REPO` give confirmed Bronze tables; tables named in plain SQL are inferred.
+
+The reuse check is refused while a missing table has no route, or has `provided_code` without code. The reuse check, Silver and Gold outputs must cite each missing table as `<table> (route: data_analysis)` or `<table> (route: provided)`. `get_session` lists the missing tables with their route and whether code was given. A reopen of `bronze_identification` clears the routes. Pasted code stays in the session log only.
 
 **Data extraction (FR-B11).** The approved `bronze_identification` version carries the Bronze table list (`submit_stage(..., bronze_tables=[...])`). At `data_extraction` the modeller may give a separate permission, logged by `grant_permission` with the user, time and tables. `sample_rows` is refused without an active permission, after `revoke_permission`, for a table that was not granted or is no longer in the approved Bronze list, and once `data_extraction` is approved. It caps rows at 20 and never writes them to disk. In Phase 0 there is no source connector, so it returns `not_available`; a future connector implements `RowSampler` in `src/dma/connectors/sampling.py`. If the permission is declined or sampling is not available, the stage output says "skipped" with the reason and is approved like any other.
 
