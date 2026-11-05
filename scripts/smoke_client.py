@@ -17,6 +17,10 @@ DEFAULT_MODEL = "synthetic_fleet_eip"
 
 
 BRONZE = ["brnz_fleetops.booking", "brnz_fleetops.driver"]
+# One missing table per route: store_targets with pasted SQL, refunds by data analysis.
+TABLE_STATUS = {"booking": "dbt_model_found", "driver": "already_modelled", "store_targets": "missing", "refunds": "missing"}
+TARGETS_SQL = "select s.store_id, s.monthly_target from raw.store_targets_extract s"
+CITES = " Evidence: store_targets (route: provided); refunds (route: data_analysis) [inferred]."
 WAVE3 = ["Bronze", "Silver - Staging", "Silver - IDM", "GOLD - SDM", "Lookup", "Report Table Mapping"]
 # Synthetic rows for the output workbook, by the stage that proposes them.
 SMX_ROWS = {
@@ -48,14 +52,20 @@ async def gate_check(client: Client) -> bool:
     refused = None
     for st in started["stages"]:
         stage = st["stage"]
-        args = {"session_id": sid, "stage": stage, "content": f"smoke {stage}"}
+        args = {"session_id": sid, "stage": stage, "content": f"smoke {stage}." + (CITES if stage in ("reuse_check", "silver_staging", "silver_idm", "gold") else "")}
         if stage == "bronze_identification":
             args["bronze_tables"] = BRONZE
+            args["table_status"] = TABLE_STATUS
         if stage in SMX_ROWS:
             args["smx_rows"] = SMX_ROWS[stage]
         if stage == "data_extraction":
             # The modeller declined, so no grant is logged and sampling must be refused.
             refused = await client.call_tool("sample_rows", {"session_id": sid, "table": BRONZE[0]})
+            # The modeller chose a route per missing table after major gate 1.
+            for call, a in [("choose_missing_route", {"table": "store_targets", "route": "provided_code"}), ("provide_table_code", {"table": "store_targets", "code": TARGETS_SQL, "dialect": "databricks"}), ("choose_missing_route", {"table": "refunds", "route": "data_analysis"})]:
+                r = await client.call_tool(call, {"session_id": sid, **a})
+                if r.is_error:
+                    return fail(f"{call} failed: {r.content[0].text}")
             args["content"] = "skipped: the modeller declined data extraction, so data analysis is metadata only"
         v = await client.call_tool("submit_stage", args)
         if v.is_error:
@@ -84,7 +94,7 @@ async def gate_check(client: Client) -> bool:
             wb.close()
             if names != WAVE3 or len(gold) != 1:
                 return fail(f"unexpected workbook: sheets {names}, {len(gold)} Gold rows")
-    print(f"gate: write blocked before approval, {len(started['stages'])} build stages approved, sampling refused without permission, compile_report wrote {len(report.structured_content['artifacts'])} files, then the 6-sheet workbook, requirements and lineage")
+    print(f"gate: write blocked before approval, {len(started['stages'])} build stages approved, sampling refused without permission, one missing table per route, compile_report wrote {len(report.structured_content['artifacts'])} files, then the 6-sheet workbook, requirements and lineage")
     return True
 
 

@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 FIX = ROOT / "tests" / "fixtures"
 LAYERS = ["bronze", "silver_staging", "silver_idm", "gold"]
 
+# One missing table per route: store_targets with pasted SQL, refunds by data analysis.
+TABLE_STATUS = {"booking": "dbt_model_found", "driver": "already_modelled", "store_targets": "missing", "refunds": "missing"}
+TARGETS_SQL = "select s.store_id, s.monthly_target from raw.store_targets_extract s"
+CITES = " Evidence: store_targets (route: provided); refunds (route: data_analysis) [inferred]."
+
 # Synthetic rows for the output workbook, by the stage that proposes them.
 SMX_ROWS = {
     "bronze_identification": {"Bronze": [{"schema": "brnz_fleetops", "table name": "booking", "source system": "fleetops"}, {"schema": "brnz_fleetops", "table name": "driver", "source system": "fleetops"}]},
@@ -51,8 +56,11 @@ CALLS = [
     ("record_decision", {"session_id": "$sid", "stage": "scope", "version": 2, "decision": "approve"}),
     ("write_artifact", {"kind": "lineage_mermaid", "name": "too_early", "content": "flowchart LR", "session_id": "$sid"}),
     ("_approve_until", {"stage": "bronze_identification"}),
-    ("submit_stage", {"session_id": "$sid", "stage": "bronze_identification", "content": "Bronze: brnz_fleetops.booking (dbt model fct_booking), brnz_fleetops.driver (data analysis).", "bronze_tables": ["brnz_fleetops.booking", "brnz_fleetops.driver"], "smx_rows": SMX_ROWS["bronze_identification"]}),
+    ("submit_stage", {"session_id": "$sid", "stage": "bronze_identification", "content": "Bronze: brnz_fleetops.booking (dbt model fct_booking), brnz_fleetops.driver (data analysis).", "bronze_tables": ["brnz_fleetops.booking", "brnz_fleetops.driver"], "smx_rows": SMX_ROWS["bronze_identification"], "table_status": TABLE_STATUS}),
     ("record_decision", {"session_id": "$sid", "stage": "bronze_identification", "version": 1, "decision": "approve"}),
+    ("choose_missing_route", {"session_id": "$sid", "table": "store_targets", "route": "provided_code"}),
+    ("provide_table_code", {"session_id": "$sid", "table": "store_targets", "code": TARGETS_SQL, "dialect": "databricks"}),
+    ("choose_missing_route", {"session_id": "$sid", "table": "refunds", "route": "data_analysis"}),
     ("sample_rows", {"session_id": "$sid", "table": "brnz_fleetops.booking"}),
     ("submit_stage", {"session_id": "$sid", "stage": "data_extraction", "content": "Skipped: the modeller declined data extraction, so data analysis is metadata only."}),
     ("record_decision", {"session_id": "$sid", "stage": "data_extraction", "version": 1, "decision": "approve"}),
@@ -173,7 +181,7 @@ async def approve_rest(client, sid: str, until: str | None = None) -> None:
         if st["stage"] == until:
             break
         if st["status"] != "approved":
-            args = {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}."}
+            args = {"session_id": sid, "stage": st["stage"], "content": f"Demo output for {st['stage']}." + CITES}
             if st["stage"] in SMX_ROWS:
                 args["smx_rows"] = SMX_ROWS[st["stage"]]
             v = (await client.call_tool("submit_stage", args)).structured_content["version"]
