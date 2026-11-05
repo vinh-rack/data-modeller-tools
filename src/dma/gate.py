@@ -290,6 +290,7 @@ class GateStore:
         self.max_content_bytes = int(config.get("max_content_bytes", 1_000_000))
         # Output SMX sheets (config/smx_template.yaml): which stages may give rows for each sheet, and its headers.
         self.smx_sheets: list[dict[str, Any]] = list((smx_template or {}).get("sheets") or [])
+        self.smx_style: dict[str, Any] = dict((smx_template or {}).get("style") or {})
         self.writer = writer
         self.user = user
         self.clock = clock
@@ -533,7 +534,7 @@ class GateStore:
             for stage in s.stages:
                 if stage in sheet.get("stages", []):
                     rows += ((s.versions[stage][s.approved[stage] - 1].get("smx_rows") or {}).get(sheet["name"]) or [])
-            sheets.append({"name": sheet["name"], "headers": list(sheet["headers"]), "rows": rows})
+            sheets.append({"name": sheet["name"], "headers": list(sheet["headers"]), "rows": rows, "tab_color": sheet.get("tab_color"), "reviewer_columns": list(sheet.get("left_empty") or [])})
         return sheets
 
     def require_complete(self, session_id: str) -> _Session:

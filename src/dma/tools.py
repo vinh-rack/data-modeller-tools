@@ -556,7 +556,7 @@ class DmaTools:
                 sheets = self.gate.approved_smx_rows(session_id)
                 empty = [s["name"] for s in sheets if not s["rows"]]
                 notes = [f"sheets with no approved rows (header only): {', '.join(empty)}"] if empty else []
-                content = json.dumps({"sheets": sheets}, ensure_ascii=False)
+                content = json.dumps({"sheets": sheets, "style": self.gate.smx_style}, ensure_ascii=False)
             written = self.writer.write(kind, name, content)
             written.notes = notes
             self.gate.record_artifact(session_id, written.path)

@@ -257,3 +257,24 @@ def test_dbt_dir_junction_refused(writer, out, tmp_path):
 def test_artifacts_never_land_in_dbt_dir(writer):
     with pytest.raises(WriterError):
         writer.safe_path(".dbt/pulls.jsonl")
+
+
+def test_xlsx_has_the_shared_smx_look(writer):
+    rows = [{"PBI Report": "Orders", "Comments": "x" * 200}, {"PBI Report": "Customers"}]
+    sheets = {"sheets": [{"name": "Report Table Mapping", "headers": ["PBI Report", "Status", "Comments"], "rows": rows, "tab_color": "70AD47", "reviewer_columns": ["Status"]}], "style": {"font_size": 10}}
+    wb = openpyxl.load_workbook(writer.write("proposed_smx_xlsx", "styled", json.dumps(sheets)).path)
+    ws = wb["Report Table Mapping"]
+    head = ws["A1"]
+    assert head.font.b and head.font.name == "Calibri" and head.font.sz == 10 and head.fill.fgColor.rgb.endswith("FFC000")
+    assert ws.freeze_panes == "A2" and ws.auto_filter.ref == "A1:C3" and ws.sheet_properties.tabColor.rgb.endswith("70AD47")
+    assert ws["B1"].comment is not None and ws["B2"].fill.fgColor.rgb.endswith("EDEDED") and ws["A2"].fill.fill_type is None
+    assert ws.column_dimensions["A"].width == 12 and ws.column_dimensions["C"].width == 60 and ws["C2"].alignment.wrap_text
+    assert ws["A2"].border.left.style == "thin" and ws["A2"].alignment.vertical == "top"
+    assert wb.properties.creator == "Data Modeller Assistant"
+    wb.close()
+
+
+def test_xlsx_style_colours_are_checked(writer):
+    sheets = {"sheets": [{"name": "Bronze", "headers": ["schema"], "rows": []}], "style": {"header_fill": "orange"}}
+    with pytest.raises(WriterError, match="hex colour"):
+        writer.write("proposed_smx_xlsx", "bad_style", json.dumps(sheets))

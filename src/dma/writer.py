@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Callable, Literal
 
 import openpyxl
+from openpyxl.comments import Comment
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel
 
 ArtifactKind = Literal["findings_md", "decisions_json", "proposed_smx_xlsx", "lineage_mermaid", "requirements_md"]
@@ -179,9 +182,14 @@ class ArtifactWriter:
         return content.encode("utf-8")
 
 
+XLSX_STYLE = {"font": "Calibri", "font_size": 9, "header_fill": "FFC000", "reviewer_fill": "EDEDED", "border_color": "BFBFBF", "min_width": 8, "max_width": 60}
+_HEX = re.compile(r"^[0-9A-Fa-f]{6}$")
+
+
 def _rows_to_xlsx(content: str) -> bytes:
-    """Content is JSON {"sheets": [{"name", "headers", "rows"}]}. Exactly these sheets are written, in order, each with its
-    header row in the given order. A row key that is not one of the sheet's headers is refused."""
+    """Content is JSON {"sheets": [{"name", "headers", "rows", "tab_color"?, "reviewer_columns"?}], "style"?: {...}}.
+    Exactly these sheets are written, in order, each with its header row in the given order. A row key that is not one of
+    the sheet's headers is refused. The style follows the shared SMX files, plus a frozen header and sized columns."""
     try:
         data = json.loads(content)
     except json.JSONDecodeError as e:
@@ -189,6 +197,10 @@ def _rows_to_xlsx(content: str) -> bytes:
     sheets = data.get("sheets") if isinstance(data, dict) else None
     if not isinstance(sheets, list) or not sheets or not all(isinstance(s, dict) and isinstance(s.get("headers"), list) and isinstance(s.get("rows"), list) for s in sheets):
         raise WriterError('proposed_smx_xlsx content must be {"sheets": [{"name": ..., "headers": [...], "rows": [...]}]}')
+    style = {**XLSX_STYLE, **(data.get("style") or {})}
+    for key in ("header_fill", "reviewer_fill", "border_color"):
+        if not _HEX.match(str(style[key])):
+            raise WriterError(f"style {key} must be a 6-digit hex colour, got {style[key]!r}")
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     for sheet in sheets:
@@ -200,6 +212,37 @@ def _rows_to_xlsx(content: str) -> bytes:
             if extra:
                 raise WriterError(f"sheet {sheet.get('name')!r}: row keys {sorted(extra)} are not headers {headers}")
             ws.append([row.get(h) for h in headers])
+        _style_sheet(ws, headers, len(sheet["rows"]), style, sheet.get("tab_color"), set(sheet.get("reviewer_columns") or []))
+    wb.properties.creator = "Data Modeller Assistant"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _style_sheet(ws, headers: list[str], n_rows: int, style: dict, tab_color: str | None, reviewer: set[str]) -> None:
+    side = Side(style="thin", color=style["border_color"])
+    border = Border(left=side, right=side, top=side, bottom=side)
+    body_font = Font(name=style["font"], size=style["font_size"])
+    head_font = Font(name=style["font"], size=style["font_size"], bold=True)
+    head_fill = PatternFill("solid", fgColor=style["header_fill"])
+    review_fill = PatternFill("solid", fgColor=style["reviewer_fill"])
+    last = get_column_letter(len(headers))
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(1, ci)
+        cell.font, cell.fill, cell.border = head_font, head_fill, border
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+        if h in reviewer:
+            cell.comment = Comment("Filled by the reviewers. The assistant leaves this empty.", "Data Modeller Assistant")
+        longest = max([len(h)] + [len(str(ws.cell(r, ci).value)) for r in range(2, n_rows + 2) if ws.cell(r, ci).value is not None])
+        ws.column_dimensions[get_column_letter(ci)].width = min(max(longest + 2, style["min_width"]), style["max_width"])
+        for r in range(2, n_rows + 2):
+            c = ws.cell(r, ci)
+            c.font, c.border = body_font, border
+            c.alignment = Alignment(vertical="top", wrap_text=len(str(c.value or "")) > style["max_width"])
+            if h in reviewer:
+                c.fill = review_fill
+    ws.row_dimensions[1].height = 24
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{last}{n_rows + 1}"
+    if tab_color and _HEX.match(str(tab_color)):
+        ws.sheet_properties.tabColor = str(tab_color)

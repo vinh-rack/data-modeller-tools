@@ -8,29 +8,45 @@
 # Silver and Gold row must fill, since major gates 2 and 3 check the transform logic per column (D7).
 # The older CDM v1.0 layout is read (smx_mapping.yaml) but never written.
 layout: EIP_SMX wave3
+# Look of the written workbook, matching the shared SMX files: Calibri, a bold header on amber with thin borders and
+# a filter. Colours are hex RGB. Widths are in Excel characters; longer text wraps instead of widening the column.
+style:
+  font: Calibri
+  font_size: 9
+  header_fill: FFC000
+  reviewer_fill: EDEDED
+  border_color: BFBFBF
+  min_width: 8
+  max_width: 60
 sheets:
   - name: Bronze
+    tab_color: C65911
     stages: [bronze_identification]
     headers: [schema, table name, source system, source database/schema, description]
   - name: Silver - Staging
+    tab_color: A6A6A6
     stages: [silver_staging]
     headers: [target schema, target table, target column name, data type, set no., source table name, source column name, join/rule/filter applied]
     rule_header: join/rule/filter applied
     source_headers: [source table name, source column name]
   - name: Silver - IDM
+    tab_color: 7F7F7F
     stages: [silver_idm]
     headers: [schema, subject area, table_name, column name, data type, set no., source system, source table / file, source column, pk, scd 2, rules]
     rule_header: rules
     source_headers: [source table / file, source column]
   - name: GOLD - SDM
+    tab_color: BF8F00
     stages: [gold]
     headers: [schema name, table name, column name, set no., pk, source system, source table, source column, data type, rules]
     rule_header: rules
     source_headers: [source table, source column]
   - name: Lookup
+    tab_color: 5B9BD5
     stages: [silver_idm, gold]
     headers: [Schema Name, Table Name, Column Name, SET, PK, Rule Related Comments]
   - name: Report Table Mapping
+    tab_color: 70AD47
     stages: [gold]
     headers: [PBI Report, Odata Tables (Existing Redshift table), Tables, Status, SMX, Reviewed Date, Comments, PBI Table]
     left_empty: [Status, Reviewed Date]
