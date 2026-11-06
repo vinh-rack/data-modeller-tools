@@ -3,9 +3,16 @@
 import io
 import json
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Iterator, Literal
+
+try:
+    import fcntl
+except ImportError:  # Windows: the in-process lock alone serves the one stdio process.
+    fcntl = None
 
 import openpyxl
 from openpyxl.comments import Comment
@@ -46,6 +53,19 @@ class WrittenArtifact(BaseModel):
 
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+class _SessionLock:
+    """One per session log path in this process: a reentrant thread lock, plus an exclusive flock on the log itself
+    (POSIX only) taken by the outermost holder, so a nested use in the same thread never waits on its own flock."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.depth = 0
+
+
+_SESSION_LOCKS: dict[str, _SessionLock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
 
 
 class ArtifactWriter:
@@ -126,6 +146,27 @@ class ArtifactWriter:
             mode = "ab"
         with open(target, mode) as fh:
             fh.write(line)
+
+    @contextmanager
+    def session_lock(self, session_id: str) -> Iterator[None]:
+        """Hold the session exclusively while the caller replays its log, checks and appends. No file is created:
+        the flock is on events.jsonl itself, and only when it exists. One replica is the supported setup."""
+        target = self.session_log(session_id)
+        with _SESSION_LOCKS_GUARD:
+            entry = _SESSION_LOCKS.setdefault(str(target), _SessionLock())
+        with entry.lock:
+            entry.depth += 1
+            fh = None
+            try:
+                if entry.depth == 1 and fcntl is not None and target.is_file():
+                    fh = open(target, "rb")
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                entry.depth -= 1
+                if fh is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    fh.close()
 
     def read_session_events(self, session_id: str) -> list[dict]:
         target = self.session_log(session_id)

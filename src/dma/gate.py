@@ -4,6 +4,7 @@ State is never stored directly. It is rebuilt by replaying the session's append-
 continues where the last one stopped. All file IO goes through ArtifactWriter.
 """
 
+import functools
 import hashlib
 import json
 import uuid
@@ -273,6 +274,18 @@ def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _serialised(method):
+    """Run a gate operation while holding the session lock, so replay, checks and the append cannot interleave with another request."""
+    @functools.wraps(method)
+    def wrapper(self, session_id, *args, **kwargs):
+        try:
+            with self.writer.session_lock(session_id):
+                return method(self, session_id, *args, **kwargs)
+        except WriterError as e:
+            raise GateError(str(e)) from e
+    return wrapper
+
+
 class GateStore:
     def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None):
         flows = config.get("flows") or {}
@@ -322,6 +335,7 @@ class GateStore:
         self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
         return self.view(session_id)
 
+    @_serialised
     def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None, smx_rows: dict[str, list[dict[str, Any]]] | None = None, table_status: dict[str, str] | None = None) -> StageVersion:
         s = self._load_active(session_id)
         if s.complete:
@@ -351,6 +365,7 @@ class GateStore:
         self._append(session_id, record)
         return _version(self._load(session_id).versions[stage][-1])
 
+    @_serialised
     def decide(self, session_id: str, stage: str, version: int, decision: str, note: str | None = None, then: str | None = None, reopen_stage: str | None = None) -> SessionView:
         s = self._load_active(session_id)
         if decision not in DECISIONS:
@@ -387,6 +402,7 @@ class GateStore:
         self._append(session_id, {"type": "decision", "stage": stage, "version": version, "decision": decision, "note": note, "then": then, "reopen_stage": reopen_stage, "invalidated": invalidated})
         return self.view(session_id)
 
+    @_serialised
     def grant(self, session_id: str, permission: str, tables: list[str]) -> SessionView:
         """Log a permission to sample the given approved Bronze tables. Only while the session is at data_extraction (FR-B11)."""
         s = self._load_active(session_id)
@@ -407,6 +423,7 @@ class GateStore:
         self._append(session_id, {"type": "permission_granted", "permission": permission, "tables": [by_key[t.lower()] for t in wanted]})
         return self.view(session_id)
 
+    @_serialised
     def revoke(self, session_id: str, permission: str) -> SessionView:
         s = self._load(session_id)
         if permission not in PERMISSIONS:
@@ -431,6 +448,7 @@ class GateStore:
             raise GateError(f"table {name!r} is {status[name]}, not missing; only missing tables take a route or code")
         return name
 
+    @_serialised
     def choose_route(self, session_id: str, table: str, route: str) -> SessionView:
         s = self._load_active(session_id)
         if route not in ROUTES:
@@ -439,6 +457,7 @@ class GateStore:
         self._append(session_id, {"type": "route_chosen", "table": name, "route": route})
         return self.view(session_id)
 
+    @_serialised
     def provide_code(self, session_id: str, table: str, code: str, dialect: str) -> str:
         """Log code the modeller pasted for a missing table. Returns the table's approved name; parsing is the caller's job."""
         s = self._load_active(session_id)
@@ -549,6 +568,7 @@ class GateStore:
         s = self.require_complete(session_id)
         return [{"stage": stage, **s.versions[stage][s.approved[stage] - 1]} for stage in s.stages]
 
+    @_serialised
     def record_artifact(self, session_id: str, path: str) -> None:
         self.require_complete(session_id)
         self._append(session_id, {"type": "artifact_written", "path": path})
