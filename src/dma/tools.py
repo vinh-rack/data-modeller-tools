@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from dma.config import Settings, load_gates, load_yaml
 from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
+from dma.identity import CallerResolver, static_caller
 from dma.gate import CODE_DIALECTS, REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
@@ -147,8 +148,10 @@ def _cell(text: str | None) -> str:
 
 
 class DmaTools:
-    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None):
         self.settings = settings
+        # stdio: the DMA_USER label. HTTP: server.py passes a resolver that reads the verified token.
+        self.caller: CallerResolver = caller or static_caller(settings.user)
         self.sampler = sampler or UnavailableSampler()
         self._pbi_factory = pbi_factory
         self._pbi_client: PowerBIClient | None = None
@@ -160,7 +163,7 @@ class DmaTools:
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             gates, templates, smx_template = load_gates(settings.config_dir)
-            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template)
+            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template, caller=self.caller)
         except GateError as e:
             raise ToolError(str(e)) from e
 

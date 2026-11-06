@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel
 
+from dma.identity import Caller, CallerResolver, CallerUnknown, static_caller
 from dma.writer import ArtifactWriter, WriterError
 
 Decision = Literal["approve", "suggest_changes", "disapprove"]
@@ -83,6 +84,7 @@ class LogEntry(BaseModel):
     invalidated: list[str]
     user: str
     ts: str
+    user_id: str | None = None
 
 
 class PermissionEntry(BaseModel):
@@ -91,6 +93,7 @@ class PermissionEntry(BaseModel):
     tables: list[str]
     user: str
     ts: str
+    user_id: str | None = None
 
 
 class MissingTable(BaseModel):
@@ -287,7 +290,7 @@ def _serialised(method):
 
 
 class GateStore:
-    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None):
+    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None, caller: CallerResolver | None = None):
         flows = config.get("flows") or {}
         if not flows or not all(isinstance(v, list) and v for v in flows.values()):
             raise GateError("gates.yaml must define flows, each a non-empty list of stages")
@@ -306,11 +309,22 @@ class GateStore:
         self.smx_style: dict[str, Any] = dict((smx_template or {}).get("style") or {})
         self.writer = writer
         self.user = user
+        # Who records each event. stdio: the DMA_USER label. HTTP: the verified token (see dma.identity).
+        self.caller: CallerResolver = caller or static_caller(user)
         self.clock = clock
 
-    def _append(self, session_id: str, record: dict[str, Any], create: bool = False) -> None:
+    def _who(self) -> Caller:
         try:
-            self.writer.append_session_event(session_id, {**record, "session_id": session_id, "user": self.user, "ts": self.clock()}, create=create)
+            return self.caller()
+        except CallerUnknown as e:
+            raise GateError(str(e)) from e
+
+    def _append(self, session_id: str, record: dict[str, Any], create: bool = False) -> None:
+        who = self._who()
+        # user_id is written only for a verified caller, so stdio logs keep their v1 shape.
+        ident = {"user": who.label, **({"user_id": who.id} if who.id is not None else {})}
+        try:
+            self.writer.append_session_event(session_id, {**record, "session_id": session_id, **ident, "ts": self.clock()}, create=create)
         except WriterError as e:
             raise GateError(str(e)) from e
 
@@ -332,7 +346,11 @@ class GateStore:
         if not scope or not scope.strip():
             raise GateError("scope is required, for example the model and tables under review")
         session_id = uuid.uuid4().hex
-        self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
+        owner = self._who().id
+        record: dict[str, Any] = {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}
+        if owner is not None:
+            record["owner"] = owner
+        self._append(session_id, record, create=True)
         return self.view(session_id)
 
     @_serialised
@@ -604,7 +622,7 @@ class GateStore:
         return SessionView(
             session_id=s.session_id, flow=s.flow, scope=s.scope, status=status, created_by=s.created_by, created_at=s.created_at,
             current_stage=current, stages=stages, allowed_next=allowed, decision_log=log, artifacts=s.artifacts,
-            permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"]) for e in s.permission_log],
+            permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"], user_id=e.get("user_id")) for e in s.permission_log],
             granted_tables=s.grant,
             missing_tables=[_missing_view(t, s.routes.get(t)) for t, st in (s.approved_table_status or {}).items() if st == "missing"],
         )
