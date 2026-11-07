@@ -148,7 +148,7 @@ def _cell(text: str | None) -> str:
 
 
 class DmaTools:
-    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False):
         self.settings = settings
         # stdio: the DMA_USER label. HTTP: server.py passes a resolver that reads the verified token.
         self.caller: CallerResolver = caller or static_caller(settings.user)
@@ -163,7 +163,7 @@ class DmaTools:
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             gates, templates, smx_template = load_gates(settings.config_dir)
-            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template, caller=self.caller)
+            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template, caller=self.caller, enforce_owner=enforce_owner)
         except GateError as e:
             raise ToolError(str(e)) from e
 

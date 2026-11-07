@@ -149,6 +149,7 @@ class _Session:
     routes: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
     ended: bool = False
+    owner: str | None = None
 
     @property
     def next_stage(self) -> str | None:
@@ -184,6 +185,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     s = _Session(first["session_id"], first["flow"], first["scope"], list(first["stages"]), first["user"], first["ts"])
     # Sessions started before stage metadata existed have no stage_meta; their stages show the id only.
     s.meta = {m["id"]: m for m in first.get("stage_meta") or []}
+    s.owner = first.get("owner")
     s.versions = {stage: [] for stage in s.stages}
     for e in events[1:]:
         kind = e.get("type")
@@ -290,7 +292,7 @@ def _serialised(method):
 
 
 class GateStore:
-    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None, caller: CallerResolver | None = None):
+    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False):
         flows = config.get("flows") or {}
         if not flows or not all(isinstance(v, list) and v for v in flows.values()):
             raise GateError("gates.yaml must define flows, each a non-empty list of stages")
@@ -311,6 +313,8 @@ class GateStore:
         self.user = user
         # Who records each event. stdio: the DMA_USER label. HTTP: the verified token (see dma.identity).
         self.caller: CallerResolver = caller or static_caller(user)
+        # HTTP mode: a session is visible only to the verified caller who started it. stdio has one local user and no owners.
+        self.enforce_owner = enforce_owner
         self.clock = clock
 
     def _who(self) -> Caller:
@@ -330,9 +334,16 @@ class GateStore:
 
     def _load(self, session_id: str) -> _Session:
         try:
-            return _replay(self.writer.read_session_events(session_id))
+            s = _replay(self.writer.read_session_events(session_id))
         except WriterError as e:
             raise GateError(str(e)) from e
+        if self.enforce_owner:
+            who = self._who()
+            # Every session operation comes through here. Another caller's session, or one with no owner, reads as
+            # missing with the writer's own wording, so its existence is not revealed.
+            if who.id is None or s.owner != who.id:
+                raise GateError(f"unknown session: {session_id}")
+        return s
 
     def _load_active(self, session_id: str) -> _Session:
         s = self._load(session_id)
@@ -628,6 +639,7 @@ class GateStore:
         )
 
     def list_sessions(self) -> list[SessionSummary]:
+        """Every readable session; in HTTP mode only the caller's own, because view() refuses the rest."""
         out = []
         for sid in self.writer.list_session_ids():
             try:
