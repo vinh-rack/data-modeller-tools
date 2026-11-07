@@ -8,7 +8,7 @@ import logging
 import os
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from dotenv import load_dotenv
 from mcp.server import MCPServer
@@ -18,7 +18,7 @@ from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from dma.config import HttpSettings, load_settings
+from dma.config import HttpSettings, Settings, load_settings
 from dma.tools import DmaTools
 
 SERVER_NAME = "data-modeller-assistant"
@@ -108,6 +108,17 @@ def serve_http(app: Starlette, http: HttpSettings) -> None:
     uvicorn.Server(config).run()
 
 
+def build_http(settings: Settings, env: Mapping[str, str]) -> Starlette:
+    """The authenticated HTTP app. The caller of each request comes from its verified token, sessions are refused to
+    anyone but their owner, and artifacts go to output/<owner>/. Raises AuthConfigError when auth is not set up."""
+    from dma.auth import build_auth, install_redaction, load_auth, token_caller
+
+    install_redaction(env)
+    cfg = load_auth(env, settings.http)
+    tools = DmaTools(settings, caller=token_caller, enforce_owner=True)
+    return http_app(build_server(tools, **build_auth(cfg)), settings.http)
+
+
 def main() -> None:
     load_dotenv(Path.cwd() / ".env")
     # stdout carries the stdio protocol, so logs go to stderr only.
@@ -116,8 +127,15 @@ def main() -> None:
     if settings.transport == "stdio":
         build_server(DmaTools(settings)).run(transport="stdio")
         return
+    from dma.auth import AuthConfigError
+
+    logging.getLogger("dma").setLevel(logging.INFO)
     # HTTP serves a shared server, so it never starts without authentication.
-    raise SystemExit("DMA_TRANSPORT=http needs DMA_AUTH=entra or DMA_AUTH=dev")
+    try:
+        app = build_http(settings, os.environ)
+    except AuthConfigError as e:
+        raise SystemExit(str(e)) from None
+    serve_http(app, settings.http)
 
 
 if __name__ == "__main__":
