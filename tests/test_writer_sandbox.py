@@ -278,3 +278,63 @@ def test_xlsx_style_colours_are_checked(writer):
     sheets = {"sheets": [{"name": "Bronze", "headers": ["schema"], "rows": []}], "style": {"header_fill": "orange"}}
     with pytest.raises(WriterError, match="hex colour"):
         writer.write("proposed_smx_xlsx", "bad_style", json.dumps(sheets))
+
+
+OWNER = "aaaaaaaa-0000-4000-8000-000000000001"
+BAD_OWNERS = ["", ".", "..", ".sessions", ".dbt", "a/b", "a\b", "../x", "C:x", "-lead", "a.b", "x" * 65, "a\x00b", "a b"]
+
+
+def test_owner_artifacts_land_in_the_owner_folder(writer, out):
+    w = writer.write("findings_md", "report", "# hi\n", owner=OWNER)
+    assert w.path == str(out.resolve() / OWNER / "20260101T000000Z_report.md")
+    plain = writer.write("findings_md", "report", "# hi\n")
+    assert plain.path == str(out.resolve() / "20260101T000000Z_report.md")
+
+
+@pytest.mark.parametrize("owner", BAD_OWNERS)
+def test_bad_owner_is_refused(writer, out, owner):
+    with pytest.raises(WriterError):
+        writer.write("findings_md", "report", "x", owner=owner)
+    assert not out.exists() or [p.name for p in out.iterdir()] == []
+
+
+def test_owner_folder_refuses_overwrite(writer):
+    writer.write("findings_md", "report", "x", owner=OWNER)
+    with pytest.raises(WriterError, match="overwrite"):
+        writer.write("findings_md", "report", "y", owner=OWNER)
+
+
+def test_owner_symlink_refused(writer, out, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    try:
+        (out / OWNER).symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks not permitted here")
+    with pytest.raises(WriterError, match="symlink"):
+        writer.write("findings_md", "report", "x", owner=OWNER)
+    assert list(outside.iterdir()) == []
+
+
+def test_owner_junction_refused(writer, out, tmp_path):
+    if os.name != "nt":
+        pytest.skip("junctions are Windows only")
+    import subprocess
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    out.mkdir(parents=True)
+    made = subprocess.run(["cmd", "/c", "mklink", "/J", str(out / OWNER), str(outside)], capture_output=True)
+    if made.returncode != 0:
+        pytest.skip("could not create a junction")
+    with pytest.raises(WriterError):
+        writer.write("findings_md", "report", "x", owner=OWNER)
+    assert list(outside.iterdir()) == []
+
+
+def test_safe_path_refuses_a_folder_outside_the_root(writer, out, tmp_path):
+    with pytest.raises(WriterError, match="owner folder"):
+        writer.safe_path("x.md", tmp_path / "elsewhere")
+    with pytest.raises(WriterError, match="owner folder"):
+        writer.safe_path("x.md", out.resolve() / OWNER / "deeper")

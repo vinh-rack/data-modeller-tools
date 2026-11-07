@@ -506,9 +506,10 @@ class DmaTools:
                 "permission_log": [p.model_dump() for p in view.permissions],
             }
             stem = f"{view.flow}_{session_id[:8]}"
+            owner = self.caller().id
             written = [
-                self.writer.write("findings_md", f"{stem}_report", "\n".join(md) + "\n"),
-                self.writer.write("decisions_json", f"{stem}_decisions", json.dumps(decisions, ensure_ascii=False)),
+                self.writer.write("findings_md", f"{stem}_report", "\n".join(md) + "\n", owner=owner),
+                self.writer.write("decisions_json", f"{stem}_decisions", json.dumps(decisions, ensure_ascii=False), owner=owner),
             ]
             for w in written:
                 self.gate.record_artifact(session_id, w.path)
@@ -560,7 +561,8 @@ class DmaTools:
                 empty = [s["name"] for s in sheets if not s["rows"]]
                 notes = [f"sheets with no approved rows (header only): {', '.join(empty)}"] if empty else []
                 content = json.dumps({"sheets": sheets, "style": self.gate.smx_style}, ensure_ascii=False)
-            written = self.writer.write(kind, name, content)
+            # A verified caller (HTTP mode) writes into output/<their id>/; stdio has no id and writes into the root as before.
+            written = self.writer.write(kind, name, content, owner=self.caller().id)
             written.notes = notes
             self.gate.record_artifact(session_id, written.path)
             return written

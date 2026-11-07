@@ -5,6 +5,7 @@ the same "unknown session" text as a missing session and that nothing was logged
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -129,3 +130,15 @@ def test_unknown_and_foreign_sessions_read_the_same(env):
     with pytest.raises(ToolError) as unknown:
         t.get_session(missing)
     assert str(foreign.value).replace(sid, "<id>") == str(unknown.value).replace(missing, "<id>")
+
+
+def test_artifacts_land_in_the_callers_folder(env):
+    t, switch = env
+    switch.who = A
+    sid = lineage(t, approve_all=True)
+    report = t.compile_report(sid)
+    mermaid = t.write_artifact("lineage_mermaid", "isolation", "flowchart LR", sid)
+    root = t.settings.output_dir
+    for path in [a.path for a in report.artifacts] + [mermaid.path]:
+        assert Path(path).parent == root / A.id
+    assert not any(p.is_file() for p in root.iterdir())

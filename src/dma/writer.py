@@ -33,6 +33,9 @@ MAX_BYTES = 5 * 1024 * 1024
 SESSIONS_DIR = ".sessions"
 EVENTS_FILE = "events.jsonl"
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# A verified caller's id (an Entra oid, or the dev user id) names their artifact folder. No dots, so it can never be
+# .sessions, .dbt, "." or "..", and no separators.
+OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_SESSION_BYTES = 50 * 1024 * 1024
 DBT_DIR = ".dbt"
@@ -77,8 +80,22 @@ class ArtifactWriter:
             if self.root == p or self.root.is_relative_to(p):
                 raise WriterError(f"output root {self.root} must not be inside protected folder {p}")
 
-    def safe_path(self, filename: str) -> Path:
-        """Resolve filename inside the root. Raises WriterError on any escape attempt."""
+    def owner_dir(self, owner: str) -> Path:
+        """output/<owner>/, the artifact folder of one verified caller. Raises WriterError on a bad id, a symlink or a junction."""
+        if not isinstance(owner, str) or not OWNER_RE.match(owner):
+            raise WriterError(f"owner must match {OWNER_RE.pattern}, got {owner!r}")
+        folder = self.root / owner
+        if folder.is_symlink():
+            raise WriterError(f"refusing to use a symlink as the owner folder: {owner}")
+        if folder.exists() and folder.resolve() != folder:
+            raise WriterError(f"owner folder escapes the output root: {owner}")
+        return folder
+
+    def safe_path(self, filename: str, folder: Path | None = None) -> Path:
+        """Resolve filename inside the root, or inside an owner folder of the root. Raises WriterError on any escape attempt."""
+        base = self.root if folder is None else folder
+        if base != self.root and base.parent != self.root:
+            raise WriterError("files may only be written in the output root or one owner folder directly under it")
         if not filename or "\x00" in filename:
             raise WriterError("empty filename or null byte")
         if any(ch in filename for ch in "/\\:"):
@@ -88,14 +105,15 @@ class ArtifactWriter:
             raise WriterError(f"absolute paths are not allowed: {filename!r}")
         if len(candidate.parts) != 1 or candidate.name in (".", ".."):
             raise WriterError(f"subfolders and traversal are not allowed: {filename!r}")
-        target = (self.root / candidate).resolve()
-        if target.parent != self.root or not target.is_relative_to(self.root):
+        target = (base / candidate).resolve()
+        if target.parent != base or not target.is_relative_to(self.root):
             raise WriterError(f"path escapes the output root: {filename!r}")
-        if (self.root / candidate).is_symlink():
+        if (base / candidate).is_symlink():
             raise WriterError(f"refusing to write through a symlink: {filename!r}")
         return target
 
-    def write(self, kind: str, name: str, content: str) -> WrittenArtifact:
+    def write(self, kind: str, name: str, content: str, owner: str | None = None) -> WrittenArtifact:
+        """A new file in the output root, or with an owner (HTTP mode) in output/<owner>/. Never overwrites."""
         if kind not in EXTENSIONS:
             raise WriterError(f"kind must be one of {sorted(EXTENSIONS)}, got {kind!r}")
         if not NAME_RE.match(name or "") or ".." in name:
@@ -104,7 +122,13 @@ class ArtifactWriter:
             raise WriterError(f"content larger than {MAX_BYTES} bytes")
 
         self.root.mkdir(parents=True, exist_ok=True)
-        target = self.safe_path(f"{self.clock()}_{name}{EXTENSIONS[kind]}")
+        folder = None
+        if owner is not None:
+            folder = self.owner_dir(owner)
+            folder.mkdir(exist_ok=True)
+            # Checked again after mkdir, in case the folder appeared as a link in between.
+            folder = self.owner_dir(owner)
+        target = self.safe_path(f"{self.clock()}_{name}{EXTENSIONS[kind]}", folder)
         data = self._render(kind, content)
         try:
             with open(target, "xb") as fh:
