@@ -1,6 +1,7 @@
 """Tool logic as plain methods. Transport-agnostic: server.py only registers these."""
 
 import json
+import threading
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Callable, Literal
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 from dma.config import Settings, load_gates, load_yaml
 from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
-from dma.identity import CallerResolver, static_caller
+from dma.identity import CallerResolver, CallerUnknown, static_caller
 from dma.gate import CODE_DIALECTS, REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
@@ -154,7 +155,8 @@ class DmaTools:
         self.caller: CallerResolver = caller or static_caller(settings.user)
         self.sampler = sampler or UnavailableSampler()
         self._pbi_factory = pbi_factory
-        self._pbi_client: PowerBIClient | None = None
+        self._pbi_clients: dict[str | None, PowerBIClient] = {}
+        self._pbi_lock = threading.Lock()
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.kb = KnowledgeBase(settings.kb_dir)
@@ -339,13 +341,20 @@ class DmaTools:
             raise ToolError(str(e)) from e
 
     def _pbi(self) -> PowerBIClient:
-        # Built on first use and kept for the life of the server, so its response cache spans the IDE session.
-        if self._pbi_client is None:
-            try:
-                self._pbi_client = self._pbi_factory()
-            except PowerBIError as e:
-                raise ToolError(str(e)) from e
-        return self._pbi_client
+        # One client per caller, built on first use and kept for the life of the server, so its response cache spans
+        # the IDE session and is never shared between users. stdio has one caller, so this is the v1 single client.
+        try:
+            key = self.caller().id
+        except CallerUnknown as e:
+            raise ToolError(str(e)) from e
+        with self._pbi_lock:
+            client = self._pbi_clients.get(key)
+            if client is None:
+                try:
+                    client = self._pbi_clients[key] = self._pbi_factory()
+                except PowerBIError as e:
+                    raise ToolError(str(e)) from e
+        return client
 
     def pbi_get_report(
         self,

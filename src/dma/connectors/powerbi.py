@@ -1,4 +1,6 @@
-"""Read-only Power BI REST client. Phase 0 auth: a delegated bearer token in PBI_ACCESS_TOKEN.
+"""Read-only Power BI REST client. Phase 0 auth: a delegated bearer token in PBI_ACCESS_TOKEN. Hosted (DMA_AUTH=entra):
+a per-user token from the on-behalf-of flow (dma.connectors.obo), resolved on every request. The MCP client's own token
+is never sent here.
 
 Every request is checked against an allowlist before anything is sent: GET on report, dataset and datasource
 metadata, and POST only to the two DAX query endpoints. DAX must be a metadata-sized EVALUATE query.
@@ -147,15 +149,26 @@ def cell(row: Mapping[str, Any], name: str) -> Any:
     return None
 
 
+def _bare(token: str | None) -> str:
+    # Get-PowerBIAccessToken -AsString already includes the "Bearer " prefix, so accept it with or without.
+    return re.sub(r"(?i)^bearer(\s+|$)", "", (token or "").strip()).strip()
+
+
 class PowerBIClient:
-    def __init__(self, token: str | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60):
-        # Get-PowerBIAccessToken -AsString already includes the "Bearer " prefix, so accept it with or without.
-        token = re.sub(r"(?i)^bearer(\s+|$)", "", (token or "").strip()).strip()
-        if not token:
-            raise PowerBIError("PBI_ACCESS_TOKEN is not set. Get one with Get-PowerBIAccessToken -AsString and put it in .env.")
+    def __init__(self, token: str | Callable[[], str] | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60, auth_message: str = AUTH_MESSAGE):
+        """token is a fixed string (PBI_ACCESS_TOKEN) or a function that returns the current one (OBO), called per request."""
+        if callable(token):
+            self._token_source: Callable[[], str] = token
+        else:
+            fixed = _bare(token)
+            if not fixed:
+                raise PowerBIError("PBI_ACCESS_TOKEN is not set. Get one with Get-PowerBIAccessToken -AsString and put it in .env.")
+            self._token_source = lambda: fixed
         if urlsplit(base).scheme != "https":
             raise PowerBIError(f"PBI_API_BASE must be an https URL, got {base!r}")
-        self._token = token
+        # Every token this client has sent, so each one is redacted from errors.
+        self._sent: set[str] = set()
+        self._auth_message = auth_message
         self.base = base.rstrip("/")
         self.max_rows = max_rows
         self._send = send or _urllib_send
@@ -173,7 +186,16 @@ class PowerBIClient:
         return f"PowerBIClient(base={self.base!r})"
 
     def _redact(self, text: str) -> str:
-        return text.replace(self._token, "[redacted]")
+        for t in self._sent:
+            text = text.replace(t, "[redacted]")
+        return text
+
+    def _token(self) -> str:
+        token = _bare(self._token_source())
+        if not token:
+            raise PowerBIAuthError("no Power BI token is available for this request", status=401)
+        self._sent.add(token)
+        return token
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Response:
         method = method.upper()
@@ -183,7 +205,7 @@ class PowerBIClient:
         key = (method, path, data)
         if key in self._cache:
             return self._cache[key]
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json, application/vnd.apache.arrow.stream"}
+        headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json, application/vnd.apache.arrow.stream"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         url = f"{self.base}/{path}"
@@ -194,7 +216,7 @@ class PowerBIClient:
                 self._sleep(wait)
                 resp = self._send(method, url, headers, data, self.timeout)
         if resp.status == 401:
-            raise PowerBIAuthError(AUTH_MESSAGE + (GROUP_AUTH_HINT if path.startswith("groups/") else ""), status=401)
+            raise PowerBIAuthError(self._auth_message + (GROUP_AUTH_HINT if path.startswith("groups/") else ""), status=401)
         if resp.status == 429:
             raise PowerBIError("Power BI returned 429 Too Many Requests and Retry-After was missing or did not help. Wait a minute and try again.", status=429)
         if resp.status >= 400:

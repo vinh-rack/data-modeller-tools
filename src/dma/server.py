@@ -108,15 +108,24 @@ def serve_http(app: Starlette, http: HttpSettings) -> None:
     uvicorn.Server(config).run()
 
 
-def build_http(settings: Settings, env: Mapping[str, str], jwks_client: Any = None) -> Starlette:
+def build_http(settings: Settings, env: Mapping[str, str], jwks_client: Any = None, obo_app: Any = None, pbi_send: Any = None) -> Starlette:
     """The authenticated HTTP app. The caller of each request comes from its verified token, sessions are refused to
     anyone but their owner, and artifacts go to output/<owner>/. Raises AuthConfigError when auth is not set up.
-    jwks_client replaces the Entra key fetch in tests."""
+
+    Power BI: entra mode gets a per-user token by on-behalf-of and never forwards the client's token; dev mode keeps
+    PBI_ACCESS_TOKEN. jwks_client, obo_app and pbi_send replace the network calls in tests."""
     from dma.auth import build_auth, install_redaction, load_auth, token_caller
+    from dma.connectors.powerbi import PowerBIClient
 
     install_redaction(env)
     cfg = load_auth(env, settings.http)
-    tools = DmaTools(settings, caller=token_caller, enforce_owner=True)
+    if cfg.mode == "entra":
+        from dma.connectors.obo import OboTokenProvider, client_factory, load_obo
+
+        pbi_factory = client_factory(OboTokenProvider(load_obo(env, cfg.tenant_id, cfg.client_id), app=obo_app), env, send=pbi_send)
+    else:
+        pbi_factory = lambda: PowerBIClient.from_env(env, send=pbi_send)
+    tools = DmaTools(settings, pbi_factory=pbi_factory, caller=token_caller, enforce_owner=True)
     return http_app(build_server(tools, **build_auth(cfg, jwks_client)), settings.http)
 
 

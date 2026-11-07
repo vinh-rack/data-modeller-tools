@@ -63,5 +63,6 @@ def entra_env(tmp_path, smx_dir, config_dir, **extra):
     return {
         "DMA_SMX_DIR": str(smx_dir), "DMA_OUTPUT_DIR": str(tmp_path / "output"), "DMA_CONFIG_DIR": str(config_dir),
         "DMA_TRANSPORT": "http", "DMA_AUTH": "entra", "DMA_ENTRA_TENANT_ID": TENANT, "DMA_ENTRA_CLIENT_ID": CLIENT_ID,
-        "DMA_ENTRA_AUDIENCE": AUDIENCE, "DMA_REQUIRED_SCOPES": SCOPE, "DMA_RESOURCE_SERVER_URL": "http://127.0.0.1:8000/mcp", **extra,
+        "DMA_ENTRA_AUDIENCE": AUDIENCE, "DMA_REQUIRED_SCOPES": SCOPE, "DMA_RESOURCE_SERVER_URL": "http://127.0.0.1:8000/mcp",
+        "DMA_ENTRA_CLIENT_SECRET": "synthetic-client-secret-for-tests", **extra,
     }

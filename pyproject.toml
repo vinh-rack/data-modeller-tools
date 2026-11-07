@@ -20,6 +20,10 @@ dependencies = [
 pbi-arrow = [
     "pyarrow>=26",
 ]
+# The hosted server (DMA_AUTH=entra): MSAL for the on-behalf-of exchange that gets each user's own Power BI token.
+hosted = [
+    "msal>=1.39",
+]
 
 [project.scripts]
 dma-server = "dma.server:main"
