@@ -11,6 +11,8 @@ dependencies = [
     "pyyaml>=6.0.3",
     "sqlglot==30.*",
     "python-dotenv>=1.2",
+    # Entra token validation in HTTP mode. Already a dependency of mcp; declared because dma.auth imports it.
+    "pyjwt[crypto]>=2.15",
 ]
 
 [project.optional-dependencies]

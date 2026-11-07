@@ -108,15 +108,16 @@ def serve_http(app: Starlette, http: HttpSettings) -> None:
     uvicorn.Server(config).run()
 
 
-def build_http(settings: Settings, env: Mapping[str, str]) -> Starlette:
+def build_http(settings: Settings, env: Mapping[str, str], jwks_client: Any = None) -> Starlette:
     """The authenticated HTTP app. The caller of each request comes from its verified token, sessions are refused to
-    anyone but their owner, and artifacts go to output/<owner>/. Raises AuthConfigError when auth is not set up."""
+    anyone but their owner, and artifacts go to output/<owner>/. Raises AuthConfigError when auth is not set up.
+    jwks_client replaces the Entra key fetch in tests."""
     from dma.auth import build_auth, install_redaction, load_auth, token_caller
 
     install_redaction(env)
     cfg = load_auth(env, settings.http)
     tools = DmaTools(settings, caller=token_caller, enforce_owner=True)
-    return http_app(build_server(tools, **build_auth(cfg)), settings.http)
+    return http_app(build_server(tools, **build_auth(cfg, jwks_client)), settings.http)
 
 
 def main() -> None:

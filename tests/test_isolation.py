@@ -142,3 +142,45 @@ def test_artifacts_land_in_the_callers_folder(env):
     for path in [a.path for a in report.artifacts] + [mermaid.path]:
         assert Path(path).parent == root / A.id
     assert not any(p.is_file() for p in root.iterdir())
+
+
+# The same isolation over HTTP, with two users holding signed Entra test tokens.
+
+import entrakit as ek
+from dma.server import build_http
+from httpkit import mcp_client
+
+
+@pytest.mark.anyio
+async def test_http_users_see_only_their_own_sessions(tmp_path):
+    env = ek.entra_env(tmp_path, SMX_DIR, CONFIG_DIR)
+    app = build_http(load_settings(env), env, jwks_client=ek.LocalJWKS())
+    tok_a = ek.token(oid=ek.USER_A, name="User A")
+    tok_b = ek.token(oid=ek.USER_B, name="User B")
+    async with mcp_client(app, headers={"authorization": f"Bearer {tok_a}"}) as a:
+        sid = (await a.call_tool("start_session", {"flow": "lineage", "scope": "http isolation"})).structured_content["session_id"]
+        await a.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "stage output"})
+    log = (tmp_path / "output" / ".sessions" / sid / "events.jsonl").read_text(encoding="utf-8")
+    first = json.loads(log.splitlines()[0])
+    assert first["owner"] == ek.USER_A and first["user"] == f"User A ({ek.USER_A})" and first["user_id"] == ek.USER_A
+
+
+@pytest.mark.anyio
+async def test_http_other_user_cannot_read_or_decide(tmp_path):
+    env = ek.entra_env(tmp_path, SMX_DIR, CONFIG_DIR)
+    settings = load_settings(env)
+    # Two apps over one output folder, as two requests to one server: each request's token names its caller.
+    app_a = build_http(settings, env, jwks_client=ek.LocalJWKS())
+    async with mcp_client(app_a, headers={"authorization": f"Bearer {ek.token(oid=ek.USER_A, name='User A')}"}) as a:
+        sid = (await a.call_tool("start_session", {"flow": "lineage", "scope": "http isolation"})).structured_content["session_id"]
+        await a.call_tool("submit_stage", {"session_id": sid, "stage": "scope", "content": "stage output"})
+    app_b = build_http(settings, env, jwks_client=ek.LocalJWKS())
+    async with mcp_client(app_b, headers={"authorization": f"Bearer {ek.token(oid=ek.USER_B, name='User B')}"}) as b:
+        got = await b.call_tool("get_session", {"session_id": sid})
+        decided = await b.call_tool("record_decision", {"session_id": sid, "stage": "scope", "version": 1, "decision": "approve"})
+        listed = (await b.call_tool("list_sessions", {})).structured_content["sessions"]
+    assert got.is_error and got.content[0].text.endswith(f"unknown session: {sid}")
+    assert decided.is_error and decided.content[0].text.endswith(f"unknown session: {sid}")
+    assert listed == []
+    events = (tmp_path / "output" / ".sessions" / sid / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(e)["type"] for e in events] == ["session_started", "stage_submitted"]
