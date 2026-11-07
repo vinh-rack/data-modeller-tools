@@ -1,14 +1,34 @@
-"""MCP entry point: builds the server, registers tools, picks the transport. No tool logic here."""
+"""MCP entry point: builds the server, registers tools, picks the transport. No tool logic here.
+
+The transport is chosen here only (DMA_TRANSPORT): stdio for v1, or Streamable HTTP for the hosted v2. Tool logic in
+tools.py is the same for both.
+"""
 
 import logging
+import os
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from mcp.server import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
-from dma.config import load_settings
+from dma.config import HttpSettings, load_settings
 from dma.tools import DmaTools
+
+SERVER_NAME = "data-modeller-assistant"
+
+
+def _version() -> str:
+    try:
+        return package_version(SERVER_NAME)
+    except PackageNotFoundError:
+        return "unknown"
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False)
 # Sampling reads source data once a connector exists; Phase 0 has none.
@@ -56,12 +76,36 @@ TOOLS = [
 ]
 
 
-def build_server(tools: DmaTools | None = None) -> MCPServer:
+def build_server(tools: DmaTools | None = None, **auth: Any) -> MCPServer:
+    """The MCP server with every tool. auth (token_verifier and auth settings) is given only in HTTP mode."""
     tools = tools or DmaTools(load_settings())
-    srv = MCPServer("data-modeller-assistant", instructions=INSTRUCTIONS, version="0.1.0")
+    srv = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version=_version(), **auth)
     for name, description, annotations in TOOLS:
         srv.tool(name=name, description=description, annotations=annotations)(getattr(tools, name))
+    health = {"status": "ok", "version": _version(), "commit": os.environ.get("DMA_GIT_COMMIT", "").strip() or "unknown"}
+
+    # Unauthenticated by design (custom routes skip the bearer check). Static: it never touches Power BI, dbt or disk.
+    @srv.custom_route("/health", methods=["GET"])
+    async def _health(request: Request) -> JSONResponse:
+        return JSONResponse(health)
+
     return srv
+
+
+def http_app(srv: MCPServer, http: HttpSettings) -> Starlette:
+    """The Streamable HTTP ASGI app. Stateless, because gate state is replayed from disk on every call and no tool
+    sends server-to-client requests. DNS rebinding protection is always on, also when bound to 0.0.0.0."""
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=list(http.allowed_hosts), allowed_origins=list(http.allowed_origins))
+    return srv.streamable_http_app(streamable_http_path=http.path, stateless_http=True, json_response=True, transport_security=security, host=http.host)
+
+
+def serve_http(app: Starlette, http: HttpSettings) -> None:
+    """Run uvicorn directly: MCPServer.run() does not pass proxy settings. Trusted proxy IPs come from uvicorn's own
+    FORWARDED_ALLOW_IPS (default 127.0.0.1 and ::1)."""
+    import uvicorn
+
+    config = uvicorn.Config(app, host=http.host, port=http.port, proxy_headers=http.proxy_headers, server_header=False, log_level="info")
+    uvicorn.Server(config).run()
 
 
 def main() -> None:
@@ -69,12 +113,11 @@ def main() -> None:
     # stdout carries the stdio protocol, so logs go to stderr only.
     logging.basicConfig(level=logging.WARNING)
     settings = load_settings()
-    srv = build_server(DmaTools(settings))
     if settings.transport == "stdio":
-        srv.run(transport="stdio")
-    else:
-        # v2: add "streamable-http" here with srv.run(transport="streamable-http", host=..., port=...). Tools stay unchanged.
-        raise SystemExit(f"DMA_TRANSPORT={settings.transport!r} is not enabled in v1. Use stdio.")
+        build_server(DmaTools(settings)).run(transport="stdio")
+        return
+    # HTTP serves a shared server, so it never starts without authentication.
+    raise SystemExit("DMA_TRANSPORT=http needs DMA_AUTH=entra or DMA_AUTH=dev")
 
 
 if __name__ == "__main__":
