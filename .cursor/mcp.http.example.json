@@ -1,0 +1,26 @@
+{
+  "mcpServers": {
+    "dma-http-dev": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:DMA_DEV_TOKEN}"
+      }
+    },
+    "dma-http-entra": {
+      "url": "https://dma.example.com/mcp",
+      "auth": {
+        "CLIENT_ID": "<public-client-app-id>",
+        "scopes": [
+          "api://<api-client-id>/dma.access",
+          "offline_access"
+        ]
+      }
+    },
+    "dma-http-entra-token": {
+      "url": "https://dma.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:DMA_ENTRA_TOKEN}"
+      }
+    }
+  }
+}

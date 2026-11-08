@@ -1,0 +1,90 @@
+{
+  "mcpServers": {
+    "dma-http-dev": {
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DMA_DEV_TOKEN}"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "list_models",
+        "get_model",
+        "find_tables_by_bronze",
+        "find_tables_by_grain",
+        "run_rules",
+        "dbt_model_lookup",
+        "dbt_upstream",
+        "dbt_repo_status",
+        "sql_column_lineage",
+        "get_session",
+        "list_sessions",
+        "pbi_get_report",
+        "pbi_model_metadata",
+        "list_kb",
+        "read_kb",
+        "get_report_map",
+        "lineage_diagram",
+        "report_lineage"
+      ]
+    },
+    "dma-http-entra": {
+      "url": "https://dma.example.com/mcp",
+      "oauth": {
+        "clientId": "<public-client-app-id>",
+        "redirectUri": "http://127.0.0.1:8080/oauth/callback",
+        "oauthScopes": [
+          "api://<api-client-id>/dma.access",
+          "offline_access"
+        ]
+      },
+      "disabled": false,
+      "autoApprove": [
+        "list_models",
+        "get_model",
+        "find_tables_by_bronze",
+        "find_tables_by_grain",
+        "run_rules",
+        "dbt_model_lookup",
+        "dbt_upstream",
+        "dbt_repo_status",
+        "sql_column_lineage",
+        "get_session",
+        "list_sessions",
+        "pbi_get_report",
+        "pbi_model_metadata",
+        "list_kb",
+        "read_kb",
+        "get_report_map",
+        "lineage_diagram",
+        "report_lineage"
+      ]
+    },
+    "dma-http-entra-token": {
+      "url": "https://dma.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DMA_ENTRA_TOKEN}"
+      },
+      "disabled": false,
+      "autoApprove": [
+        "list_models",
+        "get_model",
+        "find_tables_by_bronze",
+        "find_tables_by_grain",
+        "run_rules",
+        "dbt_model_lookup",
+        "dbt_upstream",
+        "dbt_repo_status",
+        "sql_column_lineage",
+        "get_session",
+        "list_sessions",
+        "pbi_get_report",
+        "pbi_model_metadata",
+        "list_kb",
+        "read_kb",
+        "get_report_map",
+        "lineage_diagram",
+        "report_lineage"
+      ]
+    }
+  }
+}

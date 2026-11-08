@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "dma-http-dev": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DMA_DEV_TOKEN}"
+      }
+    },
+    "dma-http-entra": {
+      "type": "http",
+      "url": "https://dma.example.com/mcp",
+      "oauth": {
+        "clientId": "<public-client-app-id>",
+        "callbackPort": 8080,
+        "authServerMetadataUrl": "https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration",
+        "scopes": "api://<api-client-id>/dma.access offline_access"
+      }
+    },
+    "dma-http-entra-token": {
+      "type": "http",
+      "url": "https://dma.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${DMA_ENTRA_TOKEN}"
+      }
+    }
+  }
+}
