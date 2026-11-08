@@ -232,12 +232,30 @@ def install_redaction(env: Mapping[str, str]) -> None:
     _installed = secrets
     base = logging.getLogRecordFactory()
 
+    def clean(value: Any) -> Any:
+        # Strings are redacted in place. Anything else is kept as is unless its text holds a secret, so formatters that
+        # unpack the args (uvicorn's access log does) still get the same shape.
+        if isinstance(value, str):
+            return redact(value, _installed)
+        text = str(value)
+        cleaned = redact(text, _installed)
+        return cleaned if cleaned != text else value
+
     def factory(*args: Any, **kwargs: Any) -> logging.LogRecord:
         record = base(*args, **kwargs)
+        if isinstance(record.msg, str):
+            record.msg = redact(record.msg, _installed)
+        if isinstance(record.args, tuple):
+            record.args = tuple(clean(a) for a in record.args)
+        elif isinstance(record.args, dict):
+            record.args = {k: clean(v) for k, v in record.args.items()}
+        # A secret split across the message and its args ("Bearer %s") only shows once formatted: flatten that one record.
         try:
-            record.msg, record.args = redact(record.getMessage(), _installed), ()
+            formatted = record.getMessage()
         except Exception:
-            record.msg, record.args = redact(str(record.msg), _installed), ()
+            formatted = None
+        if formatted is not None and redact(formatted, _installed) != formatted:
+            record.msg, record.args = redact(formatted, _installed), ()
         if record.exc_info and not record.exc_text:
             record.exc_text = redact("".join(traceback.format_exception(*record.exc_info)).rstrip("\n"), _installed)
         return record

@@ -249,3 +249,13 @@ def test_entra_scopes_accept_short_and_full_names(tmp_path):
     cfg = load_auth(env, load_settings(env).http)
     assert cfg.required_scopes == [f"{ek.AUDIENCE}/dma.access", f"{ek.AUDIENCE}/dma.admin"]
     assert cfg.issuer == ek.ISSUER and cfg.jwks_url.endswith(f"/{ek.TENANT}/discovery/v2.0/keys")
+
+
+def test_redaction_keeps_args_for_uvicorns_access_formatter(tmp_path):
+    from uvicorn.logging import AccessFormatter
+
+    install_redaction({"DMA_DEV_TOKEN": DEV_TOKEN})
+    record = logging.getLogger("uvicorn.access").makeRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', ("127.0.0.1:5000", "POST", f"/mcp?t={DEV_TOKEN}", "1.1", 200), None)
+    line = AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s').format(record)
+    assert line.startswith('127.0.0.1:5000 - "POST /mcp?t=[redacted] HTTP/1.1" 200')
+    assert DEV_TOKEN not in line
