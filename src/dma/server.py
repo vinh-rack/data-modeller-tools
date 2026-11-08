@@ -19,7 +19,8 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from dma.config import HttpSettings, Settings, load_settings
-from dma.tools import DmaTools
+from dma.tools import ARTIFACT_URI, WORKBOOK_URI, DmaTools
+from dma.writer import XLSX_MIME
 
 SERVER_NAME = "data-modeller-assistant"
 
@@ -82,6 +83,17 @@ def build_server(tools: DmaTools | None = None, **auth: Any) -> MCPServer:
     srv = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS, version=_version(), **auth)
     for name, description, annotations in TOOLS:
         srv.tool(name=name, description=description, annotations=annotations)(getattr(tools, name))
+
+    # The outputs of a session whose final stage is approved, for clients that cannot open the output folder.
+    # write_artifact and compile_report return each file's URI. The owner check is the same as for every session tool.
+    @srv.resource(ARTIFACT_URI, name="artifact", description="A text artifact (report, decisions, requirements, lineage) of one of your sessions.", mime_type="text/plain")
+    def _artifact(session_id: str, file_name: str) -> str:
+        return tools.read_artifact(session_id, file_name, binary=False)
+
+    @srv.resource(WORKBOOK_URI, name="workbook", description="The proposed SMX workbook of one of your build sessions.", mime_type=XLSX_MIME)
+    def _workbook(session_id: str, file_name: str) -> bytes:
+        return tools.read_artifact(session_id, file_name, binary=True)
+
     health = {"status": "ok", "version": _version(), "commit": os.environ.get("DMA_GIT_COMMIT", "").strip() or "unknown"}
 
     # Unauthenticated by design (custom routes skip the bearer check). Static: it never touches Power BI, dbt or disk.

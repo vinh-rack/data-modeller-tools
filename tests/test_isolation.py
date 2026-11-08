@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
 from conftest import CONFIG_DIR, SMX_DIR
 from dma.config import load_settings
@@ -73,7 +73,20 @@ CASES = {
     "provide_table_code": (lambda t: build_at_extraction(t, route=True), lambda t, sid: t.provide_table_code(sid, "store_targets", SQL)),
     "compile_report": (lambda t: lineage(t, approve_all=True), lambda t, sid: t.compile_report(sid)),
     "write_artifact": (lambda t: lineage(t, approve_all=True), lambda t, sid: t.write_artifact("lineage_mermaid", "isolation", "flowchart LR", sid)),
+    "read_artifact (resource)": (lambda t: with_artifact(t), lambda t, sid: t.read_artifact(sid, last_artifact_name(t, sid), binary=False)),
 }
+
+
+def with_artifact(t):
+    sid = lineage(t, approve_all=True)
+    t.write_artifact("lineage_mermaid", "isolation", "flowchart LR", sid)
+    return sid
+
+
+def last_artifact_name(t, sid):
+    # Read straight from the log, so user B asks for the real file name and only the owner check stands in the way.
+    events = [json.loads(line) for line in t.writer.session_log(sid).read_text(encoding="utf-8").splitlines()]
+    return Path([e for e in events if e["type"] == "artifact_written"][-1]["path"]).name
 
 
 def log_text(t, sid):
@@ -88,7 +101,7 @@ def test_other_user_is_refused_and_owner_is_not(env, tool):
     sid = setup(t)
     before = log_text(t, sid)
     switch.who = B
-    with pytest.raises(ToolError) as err:
+    with pytest.raises((ToolError, ResourceError)) as err:
         call(t, sid)
     assert str(err.value) == f"unknown session: {sid}"
     assert log_text(t, sid) == before

@@ -2,12 +2,13 @@
 
 import json
 import threading
+from pathlib import Path
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Callable, Literal
 
 import sqlglot
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from sqlglot import exp
 from pydantic import BaseModel, Field
 
@@ -27,6 +28,9 @@ from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
 from dma.rules import RuleContext, run_rules
 from dma.writer import ArtifactKind, ArtifactWriter, WriterError, WrittenArtifact
+
+ARTIFACT_URI = "dma://artifacts/{session_id}/{file_name}"
+WORKBOOK_URI = "dma://workbooks/{session_id}/{file_name}"
 
 
 class ModelList(BaseModel):
@@ -142,6 +146,11 @@ def _provided_bronze(repo: DbtRepo, r: Any, dialect: str, bronze_types: list[str
             if name and name.lower() not in ctes and not name.startswith("__dma_"):
                 found.setdefault(name, BronzeCandidate(table=name, tag="inferred", evidence=f"{r.path}: table in plain SQL"))
     return sorted(found.values(), key=lambda b: b.table)
+
+
+def _artifact_uri(session_id: str, w: WrittenArtifact) -> str:
+    template = WORKBOOK_URI if w.kind == "proposed_smx_xlsx" else ARTIFACT_URI
+    return template.format(session_id=session_id, file_name=Path(w.path).name)
 
 
 def _cell(text: str | None) -> str:
@@ -522,6 +531,7 @@ class DmaTools:
             ]
             for w in written:
                 self.gate.record_artifact(session_id, w.path)
+                w.uri = _artifact_uri(session_id, w)
             return CompiledReport(session_id=session_id, artifacts=written)
         except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
@@ -574,6 +584,22 @@ class DmaTools:
             written = self.writer.write(kind, name, content, owner=self.caller().id)
             written.notes = notes
             self.gate.record_artifact(session_id, written.path)
+            written.uri = _artifact_uri(session_id, written)
             return written
         except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
+
+    def read_artifact(self, session_id: str, file_name: str, binary: bool) -> str | bytes:
+        """Serve an artifact of the caller's own session as an MCP resource, so a client that cannot open the
+        server's output folder still gets the file. Only files the session recorded are served, read-only."""
+        try:
+            view = self.gate.view(session_id)
+            paths = [p for p in view.artifacts if Path(p).name == file_name]
+            if not paths:
+                raise GateError(f"session {session_id} has no artifact named {file_name!r}")
+            if file_name.endswith(".xlsx") != binary:
+                raise GateError(f"{file_name!r} is served from {WORKBOOK_URI if file_name.endswith('.xlsx') else ARTIFACT_URI}")
+            data = self.writer.read_artifact(paths[-1])
+        except (GateError, WriterError) as e:
+            raise ResourceError(str(e)) from e
+        return data if binary else data.decode("utf-8")

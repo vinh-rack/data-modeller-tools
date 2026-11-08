@@ -47,11 +47,18 @@ class WriterError(ValueError):
     pass
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 class WrittenArtifact(BaseModel):
     kind: str
     path: str
     bytes: int
     notes: list[str] = []
+    # Getting outputs back to a client that cannot open the server's output folder (v2 hosted): the text itself for
+    # text kinds, and for every kind the MCP resource URI that serves the file.
+    uri: str | None = None
+    content: str | None = None
 
 
 def _utc_stamp() -> str:
@@ -135,7 +142,22 @@ class ArtifactWriter:
                 fh.write(data)
         except FileExistsError as e:
             raise WriterError(f"refusing to overwrite existing file {target.name}") from e
-        return WrittenArtifact(kind=kind, path=str(target), bytes=len(data))
+        text = None if kind == "proposed_smx_xlsx" else data.decode("utf-8")
+        return WrittenArtifact(kind=kind, path=str(target), bytes=len(data), content=text)
+
+    def read_artifact(self, path: str) -> bytes:
+        """Read back an artifact this writer wrote: a file in the output root or in one owner folder, never a log."""
+        p = Path(path)
+        if p.is_symlink():
+            raise WriterError(f"refusing to read through a symlink: {p.name}")
+        target = p.resolve()
+        folder = target.parent
+        inside = folder == self.root or (folder.parent == self.root and OWNER_RE.match(folder.name) is not None)
+        if not inside or target.suffix not in EXTENSIONS.values():
+            raise WriterError(f"not an artifact in the output root: {p.name}")
+        if not target.is_file():
+            raise WriterError(f"artifact no longer exists: {p.name}")
+        return target.read_bytes()
 
     def session_log(self, session_id: str) -> Path:
         """Path of output/.sessions/<id>/events.jsonl. Raises WriterError on a bad id, a symlink or a junction anywhere on the way."""
