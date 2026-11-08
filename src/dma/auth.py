@@ -93,7 +93,7 @@ def load_auth(env: Mapping[str, str], http: HttpSettings) -> AuthConfig:
     if http.host not in LOCAL_HOSTS and not on_network:
         raise AuthConfigError(f"DMA_AUTH=dev only binds to loopback, but DMA_HTTP_HOST is {http.host!r}. Set DMA_ALLOW_DEV_AUTH_ON_NETWORK=1 only for local Docker with the port published on 127.0.0.1.")
     log.warning("!" * 72)
-    log.warning("DMA_AUTH=dev: one static bearer token, for local testing only. Never use it on a shared or hosted server.")
+    log.warning("DMA_AUTH=dev: one static shared token, for local testing only. Never use it on a shared or hosted server.")
     if on_network:
         log.warning("DMA_ALLOW_DEV_AUTH_ON_NETWORK=1: listening on %s. Publish the port on 127.0.0.1 only.", http.host)
     log.warning("!" * 72)
