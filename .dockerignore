@@ -1,0 +1,30 @@
+# Allowlist: the image gets the code, the config templates and the project files, nothing else.
+# No secrets and no client data in the image, ever: SMX, KB and the dbt repo are mounted at run time.
+*
+!src/
+!config/
+!pyproject.toml
+!uv.lock
+!README.md
+
+# Kept explicit, so a later allowlist edit cannot let these in by accident.
+.env
+.env.*
+samples/
+output/
+docs/
+kb/
+smx/
+dbt/
+tests/
+scripts/
+.git/
+.venv/
+.claude/
+.cursor/
+.kiro/
+.vscode/
+**/*.xlsx
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
