@@ -22,7 +22,8 @@ from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.diagram import Direction, LineageGraph, ReportLineage, report_lineage, table_lineage
 from dma.lineage.dbt_manifest import DbtManifest, ManifestError
 from dma.lineage.dbt_models import DbtUpstream, Unresolved
-from dma.lineage.dbt_pull import DbtPuller, PullResult
+from dma.lineage.dbt_clone import CloneResult
+from dma.lineage.dbt_pull import DbtPuller, PullResult, Runner
 from dma.lineage.dbt_repo import DbtColumn, DbtRef, DbtRepo, DbtRepoError, DbtSourceRef
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
@@ -106,6 +107,7 @@ class DbtRepoStatus(BaseModel):
     sources: int = 0
     seeds: int = 0
     problems: list[str] = Field(default_factory=list)
+    clone: CloneResult | None = Field(default=None, description="Hosted mode only: the clone made when the server started")
 
 
 class SampleResult(BaseModel):
@@ -171,6 +173,9 @@ class DmaTools:
         self.kb = KnowledgeBase(settings.kb_dir)
         self.dbt_cfg = load_yaml(settings.config_dir, "dbt.yaml")
         self._dbt_pull: PullResult | None = None
+        # Hosted mode: the start-up clone result, and a git runner that adds the token per command (dbt_clone.py).
+        self.dbt_clone: CloneResult | None = None
+        self.git_runner: Runner | None = None
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             gates, templates, smx_template = load_gates(settings.config_dir)
@@ -291,7 +296,8 @@ class DmaTools:
 
     @cached_property
     def _dbt_puller(self) -> DbtPuller:
-        return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)))
+        runner = {"runner": self.git_runner} if self.git_runner else {}
+        return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)), **runner)
 
     @cached_property
     def dbt_repo(self) -> DbtRepo:
@@ -330,12 +336,18 @@ class DmaTools:
 
     def dbt_repo_status(self) -> DbtRepoStatus:
         if self.settings.dbt_repo is None:
-            return DbtRepoStatus(configured=False, repo=None, pull_mode=self.settings.dbt_pull)
-        repo = self.dbt_repo
+            return DbtRepoStatus(configured=False, repo=None, pull_mode=self.settings.dbt_pull, clone=self.dbt_clone)
+        try:
+            repo = self.dbt_repo
+        except ToolError as e:
+            # A clone that failed at start leaves no repo to read; report why instead of failing the status call.
+            if self.dbt_clone is None or self.dbt_clone.status in ("cloned", "present"):
+                raise
+            return DbtRepoStatus(configured=True, repo=str(self.settings.dbt_repo), pull_mode=self.settings.dbt_pull, problems=[str(e), f"clone at start: {self.dbt_clone.status}: {self.dbt_clone.detail}"], clone=self.dbt_clone)
         return DbtRepoStatus(
             configured=True, repo=str(self.settings.dbt_repo), project=repo.name, pull_mode=self.settings.dbt_pull,
             this_session_pull=self._dbt_pull, last_logged_pull=self._dbt_puller.last(), commit=self._dbt_puller.head(),
-            models=len(repo.models), sources=len(repo.sources), seeds=len(repo.seeds), problems=repo.problems,
+            models=len(repo.models), sources=len(repo.sources), seeds=len(repo.seeds), problems=repo.problems, clone=self.dbt_clone,
         )
 
     def sql_column_lineage(

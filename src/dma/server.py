@@ -138,7 +138,25 @@ def build_http(settings: Settings, env: Mapping[str, str], jwks_client: Any = No
     else:
         pbi_factory = lambda: PowerBIClient.from_env(env, send=pbi_send)
     tools = DmaTools(settings, pbi_factory=pbi_factory, caller=token_caller, enforce_owner=True)
+    _clone_dbt(tools, env)
     return http_app(build_server(tools, **build_auth(cfg, jwks_client)), settings.http)
+
+
+def _clone_dbt(tools: DmaTools, env: Mapping[str, str]) -> None:
+    """Hosted start-up: clone DMA_DBT_REPO_URL into the dbt folder once if it is not there. A failure is recorded for
+    dbt_repo_status and never stops the server. The token goes to each git command only, including the daily pull."""
+    from dma.lineage.dbt_clone import auth_runner, clone_if_missing, git_auth_env
+
+    url = env.get("DMA_DBT_REPO_URL", "").strip()
+    if not url or tools.settings.dbt_repo is None:
+        return
+    token = env.get("DMA_DBT_GIT_TOKEN", "").strip()
+    user = env.get("DMA_DBT_GIT_USER", "").strip() or "x-access-token"
+    timeout = float(tools.dbt_cfg.get("git_timeout_seconds", 60)) * 5
+    if token:
+        tools.git_runner = auth_runner(git_auth_env(token, user))
+    tools.dbt_clone = clone_if_missing(url, tools.settings.dbt_repo, token=token, user=user, timeout=timeout)
+    logging.getLogger("dma.dbt").info("dbt clone at start: %s: %s", tools.dbt_clone.status, tools.dbt_clone.detail)
 
 
 def main() -> None:
