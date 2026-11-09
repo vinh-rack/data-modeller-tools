@@ -237,28 +237,43 @@ sequenceDiagram
 ---
 
 ## **6. `v2` option: hosted**
-Only if the team decides on hosting. The same tool and rules code is reused, exposed over Streamable HTTP. If a Foundry agent becomes a client, note that Foundry Agent Service only accepts remote MCP endpoints, and non-streaming MCP tool calls time out at 50 seconds.
+Built on branch `feature/v2`; deploying it is still a team decision (Q6). The same tool and rules code is reused, exposed over Streamable HTTP and packaged as a Docker image. Only the transport, auth, storage and packaging change, and stdio (v1) keeps working unchanged. If a Foundry agent becomes a client, note that Foundry Agent Service only accepts remote MCP endpoints, and non-streaming MCP tool calls time out at 50 seconds.
 
 ```mermaid
 flowchart LR
     subgraph CLIENTS["Clients"]
         C1["Cursor"]
         C2["Kiro"]
-        C3["Claude Desktop"]
+        C3["Claude Code"]
         C4["Foundry agent (optional)"]
     end
 
-    subgraph AZ["Azure"]
-        GW["Auth gateway (Entra ID)"]
-        SRV["Same MCP server code<br/>Streamable HTTP transport"]
-        SEC["Secrets store"]
+    ENTRA["Entra ID<br/>(user sign-in, OBO)"]
+
+    subgraph HOST["Container host (one replica)"]
+        PROXY["TLS proxy"]
+        SRV["Same MCP server code<br/>Streamable HTTP, stateless<br/>token check, owner check"]
+        DATA[("/data: output, smx, kb, dbt")]
     end
 
-    C1 & C2 & C3 & C4 -->|"HTTPS"| GW
-    GW --> SRV
-    SRV --> SEC
-    SRV -->|"read-only"| SYS[("Power BI / Redshift / Databricks / dbt repo / SMX store")]
+    C1 & C2 & C3 & C4 -->|"HTTPS + Entra token"| PROXY
+    C1 & C2 & C3 & C4 -.->|"sign in"| ENTRA
+    PROXY --> SRV
+    SRV -->|"read and append"| DATA
+    SRV -->|"OBO: client token as assertion"| ENTRA
+    SRV -->|"read-only, per-user OBO token"| PBI[("Power BI")]
+    SRV -->|"git clone once, pull --ff-only daily"| DBT[("dbt repo")]
 ```
+
+- Transport: Streamable HTTP at `/mcp`, stateless with JSON responses. Gate state is replayed from the append-only session logs on every call, so no request depends on server memory. No tool sends server-to-client requests, which a test guards. DNS rebinding protection is always on.
+- Auth: the server is an OAuth resource server. It publishes Protected Resource Metadata (RFC 9728) and validates Entra ID v2 access tokens: signature from the tenant JWKS, issuer, `tid`, audience (the API's client id or App ID URI), expiry and the required delegated scope. Users can be allowlisted by `oid` or group. A dev token mode exists for local Docker only.
+- Identity: the gate user, the session owner and the artifact folder come from the verified token (`oid` and name), so the decision log stays honest when several people share one server (FR-G5).
+- Isolation: a session is visible only to its owner. Artifacts are written to `output/<oid>/`, and appends to one session are serialised by a per-session lock.
+- Power BI: no token passthrough. The MCP client's token is used only as the assertion in an on-behalf-of exchange for a delegated Power BI token of the same user, cached per user in memory until shortly before it expires. The read-only allowlist and every v1 guard are unchanged. A failed OBO stops the call; there is no fallback identity.
+- Outputs: after final approval, text artifacts are returned inline, and every file is served as an MCP resource (the SMX workbook as a blob), because a remote user cannot open the server's output folder.
+- dbt: the container clones the repo once at start if it is missing, with a read-only token passed to each git command only. The v1 daily `git pull --ff-only` then applies. dbt is never run and Jinja is never rendered.
+- Packaging: a multi-stage image built with uv, with a non-root user, a read-only root filesystem (only `/data` and `/tmp` are writable) and a health check on `/health`. Secrets and client data never go into the image.
+- Not built yet: cloud deployment (registry, container host, TLS proxy, secrets store) and more than one replica, which would need shared storage with locking. OAuth login from each client against a real tenant is still to be tested, because Entra's discovery document lacks `code_challenge_methods_supported` and offers no dynamic client registration.
 
 ---
 
