@@ -36,8 +36,8 @@ Copy `.env.example` to `.env` and edit it. `.env` is git-ignored, and the server
 | `DMA_OUTPUT_DIR` | `output` | The only folder the server writes to: artifacts, plus gate logs in `.sessions/`. It must not be inside `DMA_SMX_DIR`. |
 | `DMA_CONFIG_DIR` | `config` | Folder holding `smx_mapping.yaml`, `rules.yaml` and `gates.yaml`. |
 | `DMA_KB_DIR` | `kb` | Knowledge base folder: glossary, conventions and `report_map.yaml`. The repo copy holds templates only, so point this at a git-ignored folder (for example `samples/kb`) for client files. |
-| `DMA_USER` | OS user | Name recorded on every gate decision. It is an audit label, not authentication. |
-| `DMA_TRANSPORT` | `stdio` | Only `stdio` is enabled in v1. |
+| `DMA_USER` | OS user | Name recorded on every gate decision in stdio mode. It is an audit label, not authentication. HTTP mode takes the user from the token. |
+| `DMA_TRANSPORT` | `stdio` | `stdio` for v1 in the IDE, or `http` for the hosted v2 server (section 4, which lists its variables). |
 | `PBI_ACCESS_TOKEN` | empty | Power BI bearer token, with or without the `Bearer ` prefix. See 3.5. Never commit it. |
 | `PBI_API_BASE` | `https://api.powerbi.com/v1.0/myorg` | Power BI REST base URL. Must be https. |
 | `PBI_MAX_ROWS` | `5000` | Row cap for metadata DAX queries. |
@@ -237,10 +237,125 @@ uv run --extra pbi-arrow python scripts/pbi_probe.py
 
 It runs the calls from the ARCHITECTURE call plan plus checks of INFO.VIEW and INFO.PARTITIONS on the classic endpoint, prints PASS, FAIL or SKIP for each, and answers Q8 (tenant setting), Q9 (INFO route), Q10 (datasources permission) and whether group paths work for My workspace. It makes no writes to Power BI. pytest never makes live calls.
 
-## **4. Adding a rule**
+### *3.6. Adding a rule*
 
 1. Create `src/dma/rules/<topic>.py` with a function decorated `@rule("ABC-001")`. It takes `(ctx, cfg)` and returns `list[Finding]`. `ctx.targets` holds the tables under review, `ctx.index` holds every indexed table, and `cfg` is the rule's block in `rules.yaml`.
 2. Import the module in `src/dma/rules/__init__.py` so it registers.
 3. Add an `ABC-001` block to `config/rules.yaml` with `enabled`, `severity` and any thresholds. Keep every tunable value in YAML, not code.
 4. Add tests to `tests/test_rules.py`, with at least one case that passes and one that fails. Then run `uv run pytest`.
 5. Mention the new rule id in the `run_rules` description in `src/dma/server.py`.
+
+## **4. v2: hosted**
+
+The same MCP server, packaged as a Docker image and served over Streamable HTTP, so the modelling team can share one server. The tool and rule code is the same as in stdio; only the transport, auth, storage and packaging change. stdio (sections 1 and 2) keeps working exactly as before.
+
+- Transport: Streamable HTTP at `/mcp`, stateless, JSON responses. Gate state lives in the append-only session logs, so any request can be served from disk. DNS rebinding protection is always on.
+- Identity: in HTTP mode the gate user, the session owner and the artifact folder come from the caller's verified token, never from `DMA_USER` or a tool argument.
+- Isolation: `start_session` records the owner. Every session tool, and the artifact resources, refuse sessions the caller does not own, and `list_sessions` shows only the caller's own. Artifacts go to `output/<user oid>/`.
+- Outputs back to the client: after final approval, `compile_report` and `write_artifact` return text artifacts inline (`content`) and every file as an MCP resource (`uri`): `dma://artifacts/{session_id}/{file_name}` for text, `dma://workbooks/{session_id}/{file_name}` for the SMX workbook. Writes still happen only after final approval.
+- Power BI: the client's token is never sent to Power BI. Entra mode gets a delegated Power BI token for each user through the on-behalf-of flow; dev mode keeps `PBI_ACCESS_TOKEN`.
+- Health: `GET /health` returns status, version and git commit only, without auth. It never touches Power BI or the dbt repo.
+
+### *4.1. Build and run with compose*
+
+Needs Docker. `docker-compose.yml` runs one service in dev auth mode on `127.0.0.1:8000`, with the synthetic fixtures mounted read-only.
+
+```bash
+# A dev token in .env (or the shell): 32+ characters
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+docker compose up -d --build
+curl http://127.0.0.1:8000/health
+docker compose down
+```
+
+`uv run python scripts/smoke_http.py` does all of it end to end: it starts the container, waits for `/health`, checks the 401 without a token, connects with a throwaway dev token, lists the 28 tools, runs the gated 11-stage build session, reads every output back through the client, checks the logs hold no token, and removes the container and its volumes.
+
+The image (`Dockerfile`) follows uv's Docker guide: pinned `python:3.11.15-slim-bookworm` and `ghcr.io/astral-sh/uv:0.12.3`, a cached dependency layer, a multi-stage build with the `pbi-arrow` and `hosted` extras, git for the dbt clone, a non-root user (uid 10001), and a `HEALTHCHECK` on `/health`. Only `/data` and `/tmp` are writable, so it runs with a read-only root filesystem.
+
+Data root (`DMA_DATA_DIR=/data` in the container):
+
+| Path | Mount | Holds |
+| --- | --- | --- |
+| `/data/output` | volume, writable | Artifacts in `output/<user oid>/`, gate logs in `.sessions/`, the dbt pull log in `.dbt/` |
+| `/data/smx` | read-only | Baseline SMX workbooks |
+| `/data/kb` | read-only | Knowledge base (glossary, conventions, report map) |
+| `/data/dbt` | volume, writable by git only | The dbt clone, read as files only |
+
+Never bake secrets or client data into the image. `.dockerignore` is an allowlist (`src/`, `config/`, `pyproject.toml`, `uv.lock`, `README.md`), and every secret is passed at run time. To check an image, use `docker history --no-trunc dma:dev`, and `docker run --rm --entrypoint sh dma:dev -c "find / -name '.env*' -o -name samples -o -name output 2>/dev/null"`, which should list only `/data/output`, the empty mount point.
+
+### *4.2. Environment variables*
+
+These are read in HTTP mode only, as well as everything in 1.3. `.env.example` lists them all with comments.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DMA_TRANSPORT` | `stdio` | `http` serves Streamable HTTP. The image sets it. |
+| `DMA_DATA_DIR` | unset | Data root for `output/`, `smx/`, `kb/` and `dbt/`. The image sets `/data`. An explicit `DMA_*_DIR` or `DMA_DBT_REPO` wins. |
+| `DMA_HTTP_HOST` | `127.0.0.1` | Listen address. The image sets `0.0.0.0`. |
+| `DMA_HTTP_PORT` | `8000` | Listen port. |
+| `DMA_HTTP_PATH` | `/mcp` | MCP endpoint path. |
+| `DMA_RESOURCE_SERVER_URL` | `https://<host><path>` | Public URL of the MCP endpoint as clients reach it: the resource in Protected Resource Metadata. |
+| `DMA_ALLOWED_HOSTS` | resource host plus loopback | Allowed `Host` headers, comma list; `host:*` allows any port. Others get 421. |
+| `DMA_ALLOWED_ORIGINS` | resource origin plus loopback | Allowed `Origin` headers. Others get 403. |
+| `DMA_PROXY_HEADERS` | `1` | Trust `X-Forwarded-*` from the proxies in `FORWARDED_ALLOW_IPS`. `0` ignores them. |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1,::1` | uvicorn's own variable: the TLS proxy's address or network. |
+| `DMA_GIT_COMMIT` | `unknown` | Commit shown by `/health`. A build argument of the image. |
+| `DMA_AUTH` | none | `entra` or `dev`. HTTP mode refuses to start without it. |
+| `DMA_DEV_TOKEN` | none | Dev mode: the static bearer token, 32+ characters. |
+| `DMA_DEV_USER_ID`, `DMA_DEV_USER_NAME` | `dev`, `Dev user` | Dev mode: the caller's id (its artifact folder) and name. |
+| `DMA_ALLOW_DEV_AUTH_ON_NETWORK` | unset | Dev mode refuses any host but `127.0.0.1` unless this is `1`. |
+| `DMA_ENTRA_TENANT_ID` | none | Entra mode: tenant GUID. Tokens must come from `https://login.microsoftonline.com/<tenant>/v2.0`. |
+| `DMA_ENTRA_CLIENT_ID` | none | Entra mode: client id of the API registration, which is also the OBO confidential client. |
+| `DMA_ENTRA_AUDIENCE` | none | Entra mode: the App ID URI, e.g. `api://<client id>`. The token's `aud` must be it or the client id. |
+| `DMA_REQUIRED_SCOPES` | none | Entra mode: scopes every caller needs, full or short names (`dma.access`). |
+| `DMA_ALLOWED_USERS`, `DMA_ALLOWED_GROUPS` | unset | Optional allowlists of object ids. Users match on `oid`; groups need the `groups` claim. Others get 403. |
+| `DMA_ENTRA_CLIENT_SECRET` | none | OBO credential: a client secret, or else the next two. |
+| `DMA_ENTRA_CERT_PATH`, `DMA_ENTRA_CERT_THUMBPRINT` | none | OBO credential: a PEM private key file and its certificate thumbprint. |
+| `PBI_SCOPE` | `https://analysis.windows.net/powerbi/api/.default` | Power BI scope for OBO, as in Microsoft's Execute DAX Queries quickstart. |
+| `DMA_DBT_REPO_URL` | unset | https URL of the dbt repo, without credentials, cloned once into `/data/dbt` at start if missing. |
+| `DMA_DBT_GIT_TOKEN` | unset | Read-only token for the clone and the daily pull, passed to each git command only. |
+| `DMA_DBT_GIT_USER` | `x-access-token` | User name sent with the token (HTTPS Basic). |
+
+### *4.3. Auth modes*
+
+- `dev`: one static bearer token from `DMA_DEV_TOKEN`, for local Docker testing only. It refuses to start unless the host is `127.0.0.1` or `DMA_ALLOW_DEV_AUTH_ON_NETWORK=1` is set, and logs a warning either way. Compose sets the override because the container listens on `0.0.0.0`, and publishes the port on `127.0.0.1` only. Never use dev auth on a shared or hosted server.
+- `entra`: Microsoft Entra ID v2 access tokens. The server checks the signature against the tenant JWKS (keys cached for 24 hours), the issuer, the `tid`, the audience (client id or App ID URI), the expiry, and the required delegated scope. Without a valid token the answer is 401 with `WWW-Authenticate` pointing at the Protected Resource Metadata (`/.well-known/oauth-protected-resource/mcp`). A missing scope, an app-only token or a caller outside the allowlist gets 403.
+- Tokens are never logged: bearer tokens, JWTs and secret values are redacted from every log record.
+
+### *4.4. Entra app registration*
+
+One app registration for the API, which is also the OBO confidential client:
+
+1. Set the access token version to 2 (`requestedAccessTokenVersion: 2` in the manifest). v1 tokens are refused, with a log hint.
+2. Expose an API: set the App ID URI (`DMA_ENTRA_AUDIENCE`) and add a delegated scope such as `dma.access` (`DMA_REQUIRED_SCOPES`).
+3. API permissions: add Power BI Service delegated permissions for the calls the server makes, `Report.Read.All` and `Dataset.Read.All`, and grant admin consent, so the OBO exchange needs no user prompt. Users still need access to the workspace and build permission on the dataset, as in v1.
+4. Add a client secret or a certificate for OBO (`DMA_ENTRA_CLIENT_SECRET`, or `DMA_ENTRA_CERT_PATH` and `DMA_ENTRA_CERT_THUMBPRINT`). Keep it in a secrets store, never in the image.
+5. For the allowlist by group, add the `groups` claim (token configuration). With too many groups the token has no list, and the caller is refused; allow them by oid instead.
+
+Each client needs a public client registration too, because Entra offers no dynamic client registration and no client ID metadata documents (its discovery document, fetched on 5 Nov 2026, has no `registration_endpoint`). Add the client's redirect URI (Claude Code `http://localhost:<callbackPort>/callback`, Cursor `http://localhost:8787/callback`, Kiro the `redirectUri` you set), and either list it in `knownClientApplications` of the API or grant it the `dma.access` scope.
+
+### *4.5. Client configs*
+
+Examples sit next to the stdio configs, which stay unchanged: `.mcp.http.example.json` (Claude Code), `.cursor/mcp.http.example.json` and `.kiro/settings/mcp.http.example.json`. Copy one entry into your own client config. Each file has three entries:
+
+- `dma-http-dev`: the compose server with `Authorization: Bearer` and the dev token from an env var. Claude Code: `claude mcp add --transport http dma http://127.0.0.1:8000/mcp --header "Authorization: Bearer <token>"`.
+- `dma-http-entra`: OAuth with your public client id (Claude Code `oauth.clientId` and `authServerMetadataUrl`, Cursor `auth.CLIENT_ID`, Kiro `oauth.clientId`).
+- `dma-http-entra-token`: the fallback, a token obtained by hand in an env var, for clients that refuse the OAuth login (see 4.6):
+
+```bash
+# Azure CLI, signed in to the tenant. --scope takes Entra v2.0 scopes (az account get-access-token reference).
+export DMA_ENTRA_TOKEN=$(az account get-access-token --tenant <tenant id> --scope "api://<api client id>/dma.access" --query accessToken -o tsv)
+```
+
+For this the API must accept the Azure CLI as a client (its client id `04b07795-8ddb-461a-bbee-02f9e1bf7b46` as an authorized client application). That step comes from community guides, not Microsoft's reference, so it is inferred. The token lasts up to an hour, after which you fetch a new one.
+
+Env expansion differs: `${VAR}` in Claude Code and Kiro (Kiro expands only approved variables, under "Mcp Approved Env Vars"), `${env:VAR}` in Cursor. Skills stay client-side and unchanged.
+
+### *4.6. Limits and pending checks*
+
+- One replica is the supported setup. The gate logs are locked per session with an in-process lock plus `flock` on the log file; more replicas need shared storage with locking.
+- The daily dbt pull runs on the first dbt call of each server process, as in v1, so a long-running container pulls once per restart.
+- Each user's Power BI responses are cached in memory for the life of the process, as in v1, but per user.
+- Pending, needs a real tenant: OAuth login from each client (Claude Code, Cursor, Kiro) against Entra. The server follows the MCP authorization spec (Protected Resource Metadata, audience binding, no token passthrough). But Entra's discovery document has no `code_challenge_methods_supported`, which spec-strict clients must refuse, and how Entra v2 treats the RFC 8707 `resource` parameter that clients send is unknown. Until then, use the `dma-http-entra-token` fallback.
+- Pending: the OBO exchange and the Power BI calls with a real user token. Tests use a fake MSAL and a fake Power BI only.
+- Not built: cloud deployment. A deploy would need a container host (for example Azure Container Apps) behind a TLS proxy, with `DMA_RESOURCE_SERVER_URL`, `DMA_ALLOWED_HOSTS` and `FORWARDED_ALLOW_IPS` set for it. It would also need a persistent volume for `/data/output` and `/data/dbt`, read-only storage for SMX and KB, secrets from a store (`DMA_ENTRA_CLIENT_SECRET`, `DMA_DBT_GIT_TOKEN`), one replica, and an image registry.
