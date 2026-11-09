@@ -118,20 +118,21 @@
 
 ### *5.8. v2: hosted (branch `feature/v2`)*
 
-- [ ] Serve the same tools over Streamable HTTP, stdio unchanged, transport chosen in `server.py` only (NFR-P3, NFR-P4)
-- [ ] Add `/health` with status, version and commit, no auth and no secrets
-- [ ] Authenticate HTTP callers with Entra ID tokens (issuer, audience, JWKS signature, scope), with a dev token for local Docker only
-- [ ] Publish Protected Resource Metadata so clients get a proper 401 with `WWW-Authenticate`
-- [ ] Take the gate user from the token in HTTP mode, never from `DMA_USER` or a tool argument (FR-G5)
-- [ ] Refuse sessions the caller does not own, and write artifacts under `output/<oid>/`
-- [ ] Lock each session around append and replay so concurrent decisions cannot race
-- [ ] Call Power BI with a per-user OBO token, never the client's token (NFR-S4)
-- [ ] Return artifact content to the client, and the SMX workbook as an MCP resource
-- [ ] Clone the dbt repo once on container start, token passed per command only
-- [ ] Package as a Docker image (multi-stage, non-root, read-only root filesystem) with a compose file for local testing
-- [ ] Add HTTP client config examples for Claude Code, Cursor and Kiro
-- [ ] Add `scripts/smoke_http.py` and document the hosted setup in the README
-- [ ] Check the OAuth login from each client against a real tenant (pending, needs a tenant)
+- [X] Serve the same tools over Streamable HTTP, stdio unchanged, transport chosen in `server.py` only (NFR-P3, NFR-P4)
+- [X] Add `/health` with status, version and commit, no auth and no secrets
+- [X] Authenticate HTTP callers with Entra ID tokens (issuer, audience, JWKS signature, scope), with a dev token for local Docker only
+- [X] Publish Protected Resource Metadata so clients get a proper 401 with `WWW-Authenticate`
+- [X] Take the gate user from the token in HTTP mode, never from `DMA_USER` or a tool argument (FR-G5)
+- [X] Refuse sessions the caller does not own, and write artifacts under `output/<oid>/`
+- [X] Lock each session around append and replay so concurrent decisions cannot race
+- [X] Call Power BI with a per-user OBO token, never the client's token (NFR-S4)
+- [X] Return artifact content to the client, and the SMX workbook as an MCP resource
+- [X] Clone the dbt repo once on container start, token passed per command only
+- [X] Package as a Docker image (multi-stage, non-root, read-only root filesystem) with a compose file for local testing
+- [X] Add HTTP client config examples for Claude Code, Cursor and Kiro
+- [X] Add `scripts/smoke_http.py` and document the hosted setup in the README
+- [ ] Connect Claude Code to the compose server with the dev token and run one gated fixture session, with the modeller making every decision (README 4.5)
+- [ ] Check the OAuth login from each client, and the OBO exchange with Power BI, against a real tenant (pending, needs a tenant; until then use the manual token fallback, README 4.5)
 
 ## **6. Testing, pilot and handover**
 
