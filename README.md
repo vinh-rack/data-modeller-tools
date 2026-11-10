@@ -354,7 +354,7 @@ Env expansion differs: `${VAR}` in Claude Code and Kiro (Kiro expands only appro
 ### *4.6. Limits and pending checks*
 
 - One replica is the supported setup. The gate logs are locked per session with an in-process lock plus `flock` on the log file; more replicas need shared storage with locking.
-- The daily dbt pull runs on the first dbt call of each server process, as in v1, so a long-running container pulls once per restart.
+- The daily dbt pull runs on the first dbt call, and again on the first dbt call after each pull interval (24 hours, `config/dbt.yaml`), when the clone is read again. A long-running container stays at most a day behind, as in v1.
 - Each user's Power BI responses are cached in memory for the life of the process, as in v1, but per user.
 - Pending, needs a real tenant: OAuth login from each client (Claude Code, Cursor, Kiro) against Entra. The server follows the MCP authorization spec (Protected Resource Metadata, audience binding, no token passthrough). But Entra's discovery document has no `code_challenge_methods_supported`, which spec-strict clients must refuse, and how Entra v2 treats the RFC 8707 `resource` parameter that clients send is unknown. Until then, use the `dma-http-entra-token` fallback.
 - Pending: the OBO exchange and the Power BI calls with a real user token. Tests use a fake MSAL and a fake Power BI only.

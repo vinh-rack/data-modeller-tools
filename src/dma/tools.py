@@ -2,6 +2,7 @@
 
 import json
 import threading
+import time
 from pathlib import Path
 from collections import Counter
 from functools import cached_property
@@ -160,8 +161,9 @@ def _cell(text: str | None) -> str:
 
 
 class DmaTools:
-    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False, clock: Callable[[], float] = time.monotonic):
         self.settings = settings
+        self._clock = clock
         # stdio: the DMA_USER label. HTTP: server.py passes a resolver that reads the verified token.
         self.caller: CallerResolver = caller or static_caller(settings.user)
         self.sampler = sampler or UnavailableSampler()
@@ -173,6 +175,9 @@ class DmaTools:
         self.kb = KnowledgeBase(settings.kb_dir)
         self.dbt_cfg = load_yaml(settings.config_dir, "dbt.yaml")
         self._dbt_pull: PullResult | None = None
+        self._dbt_loaded: DbtRepo | None = None
+        self._dbt_loaded_at = 0.0
+        self._dbt_lock = threading.Lock()
         # Hosted mode: the start-up clone result, and a git runner that adds the token per command (dbt_clone.py).
         self.dbt_clone: CloneResult | None = None
         self.git_runner: Runner | None = None
@@ -299,17 +304,21 @@ class DmaTools:
         runner = {"runner": self.git_runner} if self.git_runner else {}
         return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)), **runner)
 
-    @cached_property
+    @property
     def dbt_repo(self) -> DbtRepo:
-        """The local dbt clone, read once per server process after the daily pull. Raises ToolError when not configured."""
+        """The local dbt clone, read after the daily pull and read again once the pull interval has passed, so a
+        long-running server (the hosted container) also sees files of at most one day ago (D3). Raises ToolError when not configured."""
         if self.settings.dbt_repo is None:
             raise ToolError("DMA_DBT_REPO is not set. Clone the dbt repo once and point DMA_DBT_REPO at it.")
-        # The pull runs before the first read, so a session sees the files of at most one day ago (D3).
-        self._dbt_pull = self._dbt_puller.maybe_pull()
-        try:
-            return DbtRepo.load(self.settings.dbt_repo)
-        except DbtRepoError as e:
-            raise ToolError(str(e)) from e
+        with self._dbt_lock:
+            if self._dbt_loaded is None or self._clock() - self._dbt_loaded_at >= self._dbt_puller.interval.total_seconds():
+                self._dbt_pull = self._dbt_puller.maybe_pull()
+                try:
+                    repo = DbtRepo.load(self.settings.dbt_repo)
+                except DbtRepoError as e:
+                    raise ToolError(str(e)) from e
+                self._dbt_loaded, self._dbt_loaded_at = repo, self._clock()
+            return self._dbt_loaded
 
     def dbt_model_lookup(self, name: Annotated[str, Field(description="Model file name, alias, or a source table name such as raw_orders. Exact match only.")]) -> DbtLookup:
         repo = self.dbt_repo
