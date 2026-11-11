@@ -183,6 +183,20 @@ def test_cache_hit_makes_one_call():
     assert len(send.calls) == 1
 
 
+def test_cache_expires_after_ten_minutes():
+    now = [0.0]
+    renamed = {**REPORT_JSON, "name": "Renamed later"}
+    send = FakeSend(ok(REPORT_JSON), ok(renamed))
+    c = client(send, clock=lambda: now[0])
+    assert c.get_report(REPORT)["name"] == "AGI-DMA-TEST-REPORT"
+    now[0] += 599
+    assert c.get_report(REPORT)["name"] == "AGI-DMA-TEST-REPORT" and len(send.calls) == 1
+    # A long-running server sees the change once the entry is ten minutes old, and drops the old entry.
+    now[0] += 2
+    assert c.get_report(REPORT)["name"] == "Renamed later" and len(send.calls) == 2
+    assert len(c._cache) == 1
+
+
 def test_dax_queries_need_workspace_and_use_group_path(monkeypatch):
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     send = FakeSend(Response(200, {"content-type": "application/vnd.apache.arrow.stream"}, b"\x00"))

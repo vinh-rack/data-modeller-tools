@@ -23,6 +23,8 @@ from pydantic import BaseModel
 DEFAULT_BASE = "https://api.powerbi.com/v1.0/myorg"
 DEFAULT_MAX_ROWS = 5000
 MAX_RETRY_AFTER = 60
+# Responses are reused for this long, so a long-running server sees report changes and lost access within minutes.
+CACHE_SECONDS = 600
 UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 UUID_RE = re.compile(f"^{UUID}$")
 _GROUP = f"(?:groups/{UUID}/)?"
@@ -155,7 +157,7 @@ def _bare(token: str | None) -> str:
 
 
 class PowerBIClient:
-    def __init__(self, token: str | Callable[[], str] | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60, auth_message: str = AUTH_MESSAGE):
+    def __init__(self, token: str | Callable[[], str] | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60, auth_message: str = AUTH_MESSAGE, clock: Callable[[], float] = time.monotonic):
         """token is a fixed string (PBI_ACCESS_TOKEN) or a function that returns the current one (OBO), called per request."""
         if callable(token):
             self._token_source: Callable[[], str] = token
@@ -174,7 +176,8 @@ class PowerBIClient:
         self._send = send or _urllib_send
         self._sleep = sleep
         self.timeout = timeout
-        self._cache: dict[tuple[str, str, bytes | None], Response] = {}
+        self._clock = clock
+        self._cache: dict[tuple[str, str, bytes | None], tuple[float, Response]] = {}
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, **kwargs: Any) -> "PowerBIClient":
@@ -203,8 +206,11 @@ class PowerBIClient:
             raise PowerBIForbiddenCall(f"{method} {path} is not on the read-only allowlist")
         data = json.dumps(body).encode("utf-8") if body is not None else None
         key = (method, path, data)
-        if key in self._cache:
-            return self._cache[key]
+        hit = self._cache.get(key)
+        if hit and self._clock() - hit[0] < CACHE_SECONDS:
+            return hit[1]
+        # Expired entries go, so the cache holds at most ten minutes of responses.
+        self._cache = {k: v for k, v in self._cache.items() if self._clock() - v[0] < CACHE_SECONDS}
         headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json, application/vnd.apache.arrow.stream"}
         if data is not None:
             headers["Content-Type"] = "application/json"
@@ -223,7 +229,7 @@ class PowerBIClient:
             err = PowerBIError(self._redact(f"{method} {path} returned HTTP {resp.status}: {_error_text(resp.body)}"), status=resp.status)
             err.code = _error_code(resp.body)
             raise err
-        self._cache[key] = resp
+        self._cache[key] = (self._clock(), resp)
         return resp
 
     def _json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:

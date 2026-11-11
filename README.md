@@ -355,7 +355,7 @@ Env expansion differs: `${VAR}` in Claude Code and Kiro (Kiro expands only appro
 
 - One replica is the supported setup. The gate logs are locked per session with an in-process lock plus `flock` on the log file; more replicas need shared storage with locking.
 - The daily dbt pull runs on the first dbt call, and again on the first dbt call after each pull interval (24 hours, `config/dbt.yaml`), when the clone is read again. A long-running container stays at most a day behind, as in v1.
-- Each user's Power BI responses are cached in memory for the life of the process, as in v1, but per user.
+- Each user's Power BI responses are cached in memory for 10 minutes, per user, so report changes and lost access show within minutes.
 - Pending, needs a real tenant: OAuth login from each client (Claude Code, Cursor, Kiro) against Entra. The server follows the MCP authorization spec (Protected Resource Metadata, audience binding, no token passthrough). But Entra's discovery document has no `code_challenge_methods_supported`, which spec-strict clients must refuse, and how Entra v2 treats the RFC 8707 `resource` parameter that clients send is unknown. Until then, use the `dma-http-entra-token` fallback.
 - Pending: the OBO exchange and the Power BI calls with a real user token. Tests use a fake MSAL and a fake Power BI only.
 - Not built: cloud deployment. A deploy would need a container host (for example Azure Container Apps) behind a TLS proxy, with `DMA_RESOURCE_SERVER_URL`, `DMA_ALLOWED_HOSTS` and `FORWARDED_ALLOW_IPS` set for it. It would also need a persistent volume for `/data/output` and `/data/dbt`, read-only storage for SMX and KB, secrets from a store (`DMA_ENTRA_CLIENT_SECRET`, `DMA_DBT_GIT_TOKEN`), one replica, and an image registry.
