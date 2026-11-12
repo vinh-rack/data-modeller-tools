@@ -174,6 +174,9 @@ class DmaTools:
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.kb = KnowledgeBase(settings.kb_dir)
         self.dbt_cfg = load_yaml(settings.config_dir, "dbt.yaml")
+        self._index: ModelIndex | None = None
+        self._index_seen: tuple = ()
+        self._index_lock = threading.Lock()
         self._dbt_pull: PullResult | None = None
         self._dbt_loaded: DbtRepo | None = None
         self._dbt_loaded_at = 0.0
@@ -188,15 +191,21 @@ class DmaTools:
         except GateError as e:
             raise ToolError(str(e)) from e
 
-    @cached_property
+    @property
     def index(self) -> ModelIndex:
+        """Every SMX workbook in the folder, built again whenever a workbook is added, changed or removed, so a
+        long-running server never checks reuse against an old set of models."""
         if not self.settings.smx_dir.is_dir():
             raise ToolError(f"SMX folder not found: {self.settings.smx_dir}. Set DMA_SMX_DIR.")
-        return ModelIndex.build(self.settings.smx_dir, self.mapping, self.rules_cfg)
+        seen = tuple(sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in self.settings.smx_dir.glob("*.xlsx") if not p.name.startswith("~$")))
+        with self._index_lock:
+            if self._index is None or seen != self._index_seen:
+                self._index, self._index_seen = ModelIndex.build(self.settings.smx_dir, self.mapping, self.rules_cfg), seen
+            return self._index
 
-    def _model_tables(self, model_name: str) -> list[Table]:
+    def _model_tables(self, index: ModelIndex, model_name: str) -> list[Table]:
         try:
-            return self.index.get_model(model_name)
+            return index.get_model(model_name)
         except KeyError as e:
             raise ToolError(str(e.args[0])) from e
 
@@ -204,8 +213,9 @@ class DmaTools:
         return ModelList(smx_dir=str(self.settings.smx_dir), models=self.index.list_models())
 
     def get_model(self, model_name: Annotated[str, Field(description="Model name as returned by list_models (workbook file name without .xlsx).")]) -> ModelDetail:
-        tables = self._model_tables(model_name)
-        return ModelDetail(model=self.index.models[model_name], tables=tables)
+        index = self.index
+        tables = self._model_tables(index, model_name)
+        return ModelDetail(model=index.models[model_name], tables=tables)
 
     def find_tables_by_bronze(self, bronze_table: Annotated[str, Field(description="Bronze table, schema.table or bare table name, e.g. brnz_fleetops.booking.")]) -> TableList:
         return TableList(query=bronze_table, tables=[summarise(t) for t in self.index.by_bronze(bronze_table)])
@@ -229,7 +239,8 @@ class DmaTools:
         notes: list[str] = []
         if report_id:
             column_usage, notes = self._report_usage(report_id, workspace_id)
-        targets = self._model_tables(model_name)
+        index = self.index
+        targets = self._model_tables(index, model_name)
         if tables:
             wanted = {n.lower() for n in tables}
             selected = [t for t in targets if t.qualified.lower() in wanted or t.name.lower() in wanted]
@@ -238,7 +249,7 @@ class DmaTools:
             if unknown:
                 raise ToolError(f"tables not in model {model_name}: {unknown}")
             targets = selected
-        ctx = RuleContext(index=self.index, targets=targets, config=self.rules_cfg, column_usage=set(column_usage) if column_usage is not None else None)
+        ctx = RuleContext(index=index, targets=targets, config=self.rules_cfg, column_usage=set(column_usage) if column_usage is not None else None)
         findings = run_rules(ctx)
         return RuleRun(
             model=model_name,

@@ -138,3 +138,25 @@ def test_output_template_matches_the_wave3_fixture_headers():
     wb.close()
     rtm = next(s for s in template["sheets"] if s["name"] == "Report Table Mapping")
     assert set(rtm["left_empty"]) <= set(rtm["headers"])
+
+
+def test_server_index_follows_workbook_changes(tmp_path):
+    import shutil
+
+    from conftest import CONFIG_DIR
+    from dma.config import load_settings
+    from dma.tools import DmaTools
+
+    smx = tmp_path / "smx"
+    smx.mkdir()
+    shutil.copy(SMX_DIR / "synthetic_fleet_eip.xlsx", smx)
+    tools = DmaTools(load_settings({"DMA_SMX_DIR": str(smx), "DMA_OUTPUT_DIR": str(tmp_path / "output"), "DMA_CONFIG_DIR": str(CONFIG_DIR)}))
+    first = tools.index
+    assert [m.name for m in tools.list_models().models] == ["synthetic_fleet_eip"]
+    # No change on disk: the same index is reused.
+    assert tools.index is first
+    # A workbook added while the server runs is indexed on the next call, and a removed one disappears.
+    shutil.copy(SMX_DIR / "synthetic_logistics_canonical.xlsx", smx)
+    assert {m.name for m in tools.list_models().models} == {"synthetic_fleet_eip", "synthetic_logistics_canonical"}
+    (smx / "synthetic_fleet_eip.xlsx").unlink()
+    assert [m.name for m in tools.list_models().models] == ["synthetic_logistics_canonical"]
