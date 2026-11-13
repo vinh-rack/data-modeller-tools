@@ -221,6 +221,15 @@ class ArtifactWriter:
         with open(target, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
 
+    def read_session_head(self, session_id: str) -> dict:
+        """The first event of a session log only (session_started, which names the owner), without reading the rest."""
+        target = self.session_log(session_id)
+        if not target.is_file():
+            raise WriterError(f"unknown session: {session_id}")
+        with open(target, encoding="utf-8") as fh:
+            head = json.loads(fh.readline() or "{}")
+        return head if isinstance(head, dict) else {}
+
     def dbt_pull_log(self) -> Path:
         """Path of output/.dbt/pulls.jsonl, the append-only record of daily dbt repo pulls. Same symlink and junction checks as session logs."""
         folder = self.root / DBT_DIR

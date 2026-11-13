@@ -120,6 +120,20 @@ def test_list_sessions_shows_only_the_callers_own(env):
     assert [s.session_id for s in t.list_sessions().sessions] == [mine]
 
 
+def test_list_sessions_never_replays_another_callers_log(env, monkeypatch):
+    t, switch = env
+    switch.who = B
+    theirs = [lineage(t) for _ in range(3)]
+    switch.who = A
+    mine = lineage(t)
+    replayed = []
+    real = t.writer.read_session_events
+    monkeypatch.setattr(t.writer, "read_session_events", lambda sid: replayed.append(sid) or real(sid))
+    assert [s.session_id for s in t.list_sessions().sessions] == [mine]
+    # Only the first line of B's logs is read, to see the owner; the full logs are never parsed.
+    assert replayed == [mine] and not set(theirs) & set(replayed)
+
+
 def test_ownerless_session_is_invisible_in_http_mode(env, tmp_path):
     t, switch = env
     # A stdio server sharing the same output folder starts a session with no owner.

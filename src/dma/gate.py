@@ -639,12 +639,23 @@ class GateStore:
         )
 
     def list_sessions(self) -> list[SessionSummary]:
-        """Every readable session; in HTTP mode only the caller's own, because view() refuses the rest."""
+        """Every readable session; in HTTP mode only the caller's own. The owner is on the first line of each log, so
+        another caller's session is skipped without reading the rest of its log."""
+        owner = None
+        if self.enforce_owner:
+            try:
+                owner = self._who().id
+            except GateError:
+                return []
+            if owner is None:
+                return []
         out = []
         for sid in self.writer.list_session_ids():
             try:
+                if owner is not None and self.writer.read_session_head(sid).get("owner") != owner:
+                    continue
                 v = self.view(sid)
-            except GateError:
+            except (GateError, WriterError, ValueError):
                 continue
             out.append(SessionSummary(session_id=sid, flow=v.flow, scope=v.scope, status=v.status, current_stage=v.current_stage, created_at=v.created_at))
         return out
