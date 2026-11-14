@@ -268,6 +268,8 @@ curl http://127.0.0.1:8000/health
 docker compose down
 ```
 
+For your own mounts, such as a local dbt clone at `/data/dbt` in place of the `dma-dbt` volume, use `docker-compose.override.yml`. Compose merges it in automatically, and it is git-ignored, so personal paths never reach `docker-compose.yml`. A read-only clone needs `DMA_DBT_PULL: "off"` there, and you pull it on the host.
+
 `uv run python scripts/smoke_http.py` does all of it end to end: it starts the container, waits for `/health`, checks the 401 without a token, connects with a throwaway dev token, lists the 28 tools, runs the gated 11-stage build session, reads every output back through the client, checks the logs hold no token, and removes the container and its volumes.
 
 The image (`Dockerfile`) follows uv's Docker guide: pinned `python:3.11.15-slim-bookworm` and `ghcr.io/astral-sh/uv:0.12.3`, a cached dependency layer, a multi-stage build with the `pbi-arrow` and `hosted` extras, git for the dbt clone, a non-root user (uid 10001), and a `HEALTHCHECK` on `/health`. Only `/data` and `/tmp` are writable, so it runs with a read-only root filesystem.

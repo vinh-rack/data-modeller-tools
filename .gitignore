@@ -24,3 +24,6 @@ build/
 
 
 .obsidian/
+
+# Local compose additions, such as your own dbt clone mount
+docker-compose.override.yml
