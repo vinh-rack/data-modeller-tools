@@ -66,5 +66,13 @@ def test_http_settings_reject_bad_values(key, value):
         load_settings({"DMA_TRANSPORT": "http", key: value})
 
 
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])
+def test_wildcard_host_needs_a_resource_url(host):
+    with pytest.raises(ValueError, match="DMA_RESOURCE_SERVER_URL"):
+        load_settings({"DMA_TRANSPORT": "http", "DMA_HTTP_HOST": host})
+    ok = load_settings({"DMA_TRANSPORT": "http", "DMA_HTTP_HOST": host, "DMA_RESOURCE_SERVER_URL": "https://dma.example.test/mcp"}).http
+    assert ok.resource_server_url == "https://dma.example.test/mcp" and "dma.example.test" in ok.allowed_hosts
+
+
 def test_http_settings_not_read_in_stdio():
     assert load_settings({"DMA_HTTP_PORT": "eighty"}).http.port == 8000

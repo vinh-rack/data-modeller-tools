@@ -11,6 +11,7 @@ import yaml
 
 TRANSPORTS = ("stdio", "http")
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+WILDCARD_HOSTS = ("0.0.0.0", "::", "[::]")
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,11 @@ def load_http(env: Mapping[str, str]) -> HttpSettings:
     path = env.get("DMA_HTTP_PATH", "").strip() or "/mcp"
     if not path.startswith("/") or path == "/":
         raise ValueError(f"DMA_HTTP_PATH must start with / and name a path, got {path!r}")
-    resource = env.get("DMA_RESOURCE_SERVER_URL", "").strip() or f"https://{host}{path}"
+    resource = env.get("DMA_RESOURCE_SERVER_URL", "").strip()
+    if not resource and host in WILDCARD_HOSTS:
+        # The default would advertise https://0.0.0.0/mcp and allow only that host, so every real request gets 421.
+        raise ValueError(f"DMA_HTTP_HOST={host} listens on every interface, so set DMA_RESOURCE_SERVER_URL to the public URL clients use, e.g. https://dma.example.com/mcp")
+    resource = resource or f"https://{host}{path}"
     parts = urlsplit(resource)
     if parts.scheme not in ("http", "https") or not parts.netloc or parts.fragment:
         raise ValueError(f"DMA_RESOURCE_SERVER_URL must be an absolute http(s) URL without a fragment, got {resource!r}")

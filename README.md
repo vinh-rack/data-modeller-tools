@@ -296,7 +296,7 @@ These are read in HTTP mode only, as well as everything in 1.3. `.env.example` l
 | `DMA_HTTP_HOST` | `127.0.0.1` | Listen address. The image sets `0.0.0.0`. |
 | `DMA_HTTP_PORT` | `8000` | Listen port. |
 | `DMA_HTTP_PATH` | `/mcp` | MCP endpoint path. |
-| `DMA_RESOURCE_SERVER_URL` | `https://<host><path>` | Public URL of the MCP endpoint as clients reach it: the resource in Protected Resource Metadata. |
+| `DMA_RESOURCE_SERVER_URL` | `https://<host><path>` | Public URL of the MCP endpoint as clients reach it: the resource in Protected Resource Metadata. Required when the host is `0.0.0.0` or `::`, as in the image. |
 | `DMA_ALLOWED_HOSTS` | resource host plus loopback | Allowed `Host` headers, comma list; `host:*` allows any port. Others get 421. |
 | `DMA_ALLOWED_ORIGINS` | resource origin plus loopback | Allowed `Origin` headers. Others get 403. |
 | `DMA_PROXY_HEADERS` | `1` | Trust `X-Forwarded-*` from the proxies in `FORWARDED_ALLOW_IPS`. `0` ignores them. |

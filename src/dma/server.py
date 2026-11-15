@@ -163,7 +163,10 @@ def main() -> None:
     load_dotenv(Path.cwd() / ".env")
     # stdout carries the stdio protocol, so logs go to stderr only.
     logging.basicConfig(level=logging.WARNING)
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except ValueError as e:
+        raise SystemExit(str(e)) from None
     if settings.transport == "stdio":
         build_server(DmaTools(settings)).run(transport="stdio")
         return
