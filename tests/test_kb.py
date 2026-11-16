@@ -35,3 +35,10 @@ def test_report_map_unknown_and_malformed():
         KB.report("33333333-3333-3333-3333-333333333333")
     with pytest.raises(KbError, match="malformed"):
         KB.report("55555555-5555-5555-5555-555555555555")
+
+
+@pytest.mark.parametrize("text", ["reports:\n\t'x': 1\n", "reports: [1, 2\n", "- just\n- a list\n"])
+def test_report_map_that_is_not_valid_yaml_is_a_kb_error(tmp_path, text):
+    (tmp_path / "report_map.yaml").write_text(text, encoding="utf-8")
+    with pytest.raises(KbError, match="report_map.yaml"):
+        KnowledgeBase(tmp_path).report("33333333-3333-3333-3333-333333333333")

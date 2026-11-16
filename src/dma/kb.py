@@ -62,7 +62,12 @@ class KnowledgeBase:
         return KbDocument(name=name, content=(self.kb_dir / name).read_text(encoding="utf-8"))
 
     def report(self, report_id: str) -> ReportEntry:
-        raw = yaml.safe_load(self.read(REPORT_MAP).content) if REPORT_MAP in {f.name for f in self.list()} else None
+        try:
+            raw = yaml.safe_load(self.read(REPORT_MAP).content) if REPORT_MAP in {f.name for f in self.list()} else None
+        except yaml.YAMLError as e:
+            raise KbError(f"{REPORT_MAP} is not valid YAML: {str(e).splitlines()[0]}") from None
+        if raw is not None and not isinstance(raw, dict):
+            raise KbError(f"{REPORT_MAP} must be a mapping with a reports key, got a {type(raw).__name__}")
         reports = (raw or {}).get("reports") or {}
         key = next((k for k in reports if str(k).lower() == report_id.strip().lower()), None)
         if key is None:
