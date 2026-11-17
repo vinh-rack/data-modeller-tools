@@ -310,7 +310,6 @@ class GateStore:
         self.smx_sheets: list[dict[str, Any]] = list((smx_template or {}).get("sheets") or [])
         self.smx_style: dict[str, Any] = dict((smx_template or {}).get("style") or {})
         self.writer = writer
-        self.user = user
         # Who records each event. stdio: the DMA_USER label. HTTP: the verified token (see dma.identity).
         self.caller: CallerResolver = caller or static_caller(user)
         # HTTP mode: a session is visible only to the verified caller who started it. stdio has one local user and no owners.
