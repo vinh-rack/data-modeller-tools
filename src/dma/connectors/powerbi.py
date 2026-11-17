@@ -1,4 +1,6 @@
-"""Read-only Power BI REST client. Phase 0 auth: a delegated bearer token in PBI_ACCESS_TOKEN.
+"""Read-only Power BI REST client. Phase 0 auth: a delegated bearer token in PBI_ACCESS_TOKEN. Hosted (DMA_AUTH=entra):
+a per-user token from the on-behalf-of flow (dma.connectors.obo), resolved on every request. The MCP client's own token
+is never sent here.
 
 Every request is checked against an allowlist before anything is sent: GET on report, dataset and datasource
 metadata, and POST only to the two DAX query endpoints. DAX must be a metadata-sized EVALUATE query.
@@ -21,6 +23,8 @@ from pydantic import BaseModel
 DEFAULT_BASE = "https://api.powerbi.com/v1.0/myorg"
 DEFAULT_MAX_ROWS = 5000
 MAX_RETRY_AFTER = 60
+# Responses are reused for this long, so a long-running server sees report changes and lost access within minutes.
+CACHE_SECONDS = 600
 UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 UUID_RE = re.compile(f"^{UUID}$")
 _GROUP = f"(?:groups/{UUID}/)?"
@@ -147,21 +151,33 @@ def cell(row: Mapping[str, Any], name: str) -> Any:
     return None
 
 
+def _bare(token: str | None) -> str:
+    # Get-PowerBIAccessToken -AsString already includes the "Bearer " prefix, so accept it with or without.
+    return re.sub(r"(?i)^bearer(\s+|$)", "", (token or "").strip()).strip()
+
+
 class PowerBIClient:
-    def __init__(self, token: str | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60):
-        # Get-PowerBIAccessToken -AsString already includes the "Bearer " prefix, so accept it with or without.
-        token = re.sub(r"(?i)^bearer(\s+|$)", "", (token or "").strip()).strip()
-        if not token:
-            raise PowerBIError("PBI_ACCESS_TOKEN is not set. Get one with Get-PowerBIAccessToken -AsString and put it in .env.")
+    def __init__(self, token: str | Callable[[], str] | None, base: str = DEFAULT_BASE, max_rows: int = DEFAULT_MAX_ROWS, send: Send | None = None, sleep: Callable[[float], None] = time.sleep, timeout: float = 60, auth_message: str = AUTH_MESSAGE, clock: Callable[[], float] = time.monotonic):
+        """token is a fixed string (PBI_ACCESS_TOKEN) or a function that returns the current one (OBO), called per request."""
+        if callable(token):
+            self._token_source: Callable[[], str] = token
+        else:
+            fixed = _bare(token)
+            if not fixed:
+                raise PowerBIError("PBI_ACCESS_TOKEN is not set. Get one with Get-PowerBIAccessToken -AsString and put it in .env.")
+            self._token_source = lambda: fixed
         if urlsplit(base).scheme != "https":
             raise PowerBIError(f"PBI_API_BASE must be an https URL, got {base!r}")
-        self._token = token
+        # Every token this client has sent, so each one is redacted from errors.
+        self._sent: set[str] = set()
+        self._auth_message = auth_message
         self.base = base.rstrip("/")
         self.max_rows = max_rows
         self._send = send or _urllib_send
         self._sleep = sleep
         self.timeout = timeout
-        self._cache: dict[tuple[str, str, bytes | None], Response] = {}
+        self._clock = clock
+        self._cache: dict[tuple[str, str, bytes | None], tuple[float, Response]] = {}
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None, **kwargs: Any) -> "PowerBIClient":
@@ -173,7 +189,16 @@ class PowerBIClient:
         return f"PowerBIClient(base={self.base!r})"
 
     def _redact(self, text: str) -> str:
-        return text.replace(self._token, "[redacted]")
+        for t in self._sent:
+            text = text.replace(t, "[redacted]")
+        return text
+
+    def _token(self) -> str:
+        token = _bare(self._token_source())
+        if not token:
+            raise PowerBIAuthError("no Power BI token is available for this request", status=401)
+        self._sent.add(token)
+        return token
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> Response:
         method = method.upper()
@@ -181,9 +206,12 @@ class PowerBIClient:
             raise PowerBIForbiddenCall(f"{method} {path} is not on the read-only allowlist")
         data = json.dumps(body).encode("utf-8") if body is not None else None
         key = (method, path, data)
-        if key in self._cache:
-            return self._cache[key]
-        headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json, application/vnd.apache.arrow.stream"}
+        hit = self._cache.get(key)
+        if hit and self._clock() - hit[0] < CACHE_SECONDS:
+            return hit[1]
+        # Expired entries go, so the cache holds at most ten minutes of responses.
+        self._cache = {k: v for k, v in self._cache.items() if self._clock() - v[0] < CACHE_SECONDS}
+        headers = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json, application/vnd.apache.arrow.stream"}
         if data is not None:
             headers["Content-Type"] = "application/json"
         url = f"{self.base}/{path}"
@@ -194,14 +222,14 @@ class PowerBIClient:
                 self._sleep(wait)
                 resp = self._send(method, url, headers, data, self.timeout)
         if resp.status == 401:
-            raise PowerBIAuthError(AUTH_MESSAGE + (GROUP_AUTH_HINT if path.startswith("groups/") else ""), status=401)
+            raise PowerBIAuthError(self._auth_message + (GROUP_AUTH_HINT if path.startswith("groups/") else ""), status=401)
         if resp.status == 429:
             raise PowerBIError("Power BI returned 429 Too Many Requests and Retry-After was missing or did not help. Wait a minute and try again.", status=429)
         if resp.status >= 400:
             err = PowerBIError(self._redact(f"{method} {path} returned HTTP {resp.status}: {_error_text(resp.body)}"), status=resp.status)
             err.code = _error_code(resp.body)
             raise err
-        self._cache[key] = resp
+        self._cache[key] = (self._clock(), resp)
         return resp
 
     def _json(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -5,6 +5,7 @@ Session logs and artifacts from the gate check go to a temp folder, not output/.
 """
 
 import asyncio
+import io
 import os
 import shutil
 import sys
@@ -39,7 +40,7 @@ def fail(msg: str) -> bool:
     return False
 
 
-async def gate_check(client: Client) -> bool:
+async def gate_check(client: Client, fetch_workbook=None) -> bool:
     """The build flow end to end on fixtures: 11 gates, the permission declined, then the three final outputs."""
     started = (await client.call_tool("start_session", {"flow": "build", "scope": "smoke test report"})).structured_content
     sid = started["session_id"]
@@ -89,7 +90,9 @@ async def gate_check(client: Client) -> bool:
         if r.is_error:
             return fail(f"write_artifact {w['kind']} failed: {r.content[0].text}")
         if w["kind"] == "proposed_smx_xlsx":
-            wb = openpyxl.load_workbook(r.structured_content["path"], read_only=True)
+            # Over HTTP the file lives in the container, so smoke_http.py passes a reader for the workbook resource.
+            source = io.BytesIO(await fetch_workbook(r.structured_content)) if fetch_workbook else r.structured_content["path"]
+            wb = openpyxl.load_workbook(source, read_only=True)
             names, gold = wb.sheetnames, [row for row in wb["GOLD - SDM"].iter_rows(min_row=2, values_only=True)]
             wb.close()
             if names != WAVE3 or len(gold) != 1:

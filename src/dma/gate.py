@@ -4,6 +4,7 @@ State is never stored directly. It is rebuilt by replaying the session's append-
 continues where the last one stopped. All file IO goes through ArtifactWriter.
 """
 
+import functools
 import hashlib
 import json
 import uuid
@@ -13,6 +14,7 @@ from typing import Any, Callable, Literal
 
 from pydantic import BaseModel
 
+from dma.identity import Caller, CallerResolver, CallerUnknown, static_caller
 from dma.writer import ArtifactWriter, WriterError
 
 Decision = Literal["approve", "suggest_changes", "disapprove"]
@@ -82,6 +84,7 @@ class LogEntry(BaseModel):
     invalidated: list[str]
     user: str
     ts: str
+    user_id: str | None = None
 
 
 class PermissionEntry(BaseModel):
@@ -90,6 +93,7 @@ class PermissionEntry(BaseModel):
     tables: list[str]
     user: str
     ts: str
+    user_id: str | None = None
 
 
 class MissingTable(BaseModel):
@@ -145,6 +149,7 @@ class _Session:
     routes: dict[str, dict[str, Any]] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
     ended: bool = False
+    owner: str | None = None
 
     @property
     def next_stage(self) -> str | None:
@@ -180,6 +185,7 @@ def _replay(events: list[dict[str, Any]]) -> _Session:
     s = _Session(first["session_id"], first["flow"], first["scope"], list(first["stages"]), first["user"], first["ts"])
     # Sessions started before stage metadata existed have no stage_meta; their stages show the id only.
     s.meta = {m["id"]: m for m in first.get("stage_meta") or []}
+    s.owner = first.get("owner")
     s.versions = {stage: [] for stage in s.stages}
     for e in events[1:]:
         kind = e.get("type")
@@ -273,8 +279,20 @@ def _parse_stages(flow: str, items: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _serialised(method):
+    """Run a gate operation while holding the session lock, so replay, checks and the append cannot interleave with another request."""
+    @functools.wraps(method)
+    def wrapper(self, session_id, *args, **kwargs):
+        try:
+            with self.writer.session_lock(session_id):
+                return method(self, session_id, *args, **kwargs)
+        except WriterError as e:
+            raise GateError(str(e)) from e
+    return wrapper
+
+
 class GateStore:
-    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None):
+    def __init__(self, writer: ArtifactWriter, config: dict[str, Any], user: str, clock: Callable[[], str] = _utc_now, templates: dict[str, dict[str, Any]] | None = None, smx_template: dict[str, Any] | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False):
         flows = config.get("flows") or {}
         if not flows or not all(isinstance(v, list) and v for v in flows.values()):
             raise GateError("gates.yaml must define flows, each a non-empty list of stages")
@@ -292,20 +310,39 @@ class GateStore:
         self.smx_sheets: list[dict[str, Any]] = list((smx_template or {}).get("sheets") or [])
         self.smx_style: dict[str, Any] = dict((smx_template or {}).get("style") or {})
         self.writer = writer
-        self.user = user
+        # Who records each event. stdio: the DMA_USER label. HTTP: the verified token (see dma.identity).
+        self.caller: CallerResolver = caller or static_caller(user)
+        # HTTP mode: a session is visible only to the verified caller who started it. stdio has one local user and no owners.
+        self.enforce_owner = enforce_owner
         self.clock = clock
 
-    def _append(self, session_id: str, record: dict[str, Any], create: bool = False) -> None:
+    def _who(self) -> Caller:
         try:
-            self.writer.append_session_event(session_id, {**record, "session_id": session_id, "user": self.user, "ts": self.clock()}, create=create)
+            return self.caller()
+        except CallerUnknown as e:
+            raise GateError(str(e)) from e
+
+    def _append(self, session_id: str, record: dict[str, Any], create: bool = False) -> None:
+        who = self._who()
+        # user_id is written only for a verified caller, so stdio logs keep their v1 shape.
+        ident = {"user": who.label, **({"user_id": who.id} if who.id is not None else {})}
+        try:
+            self.writer.append_session_event(session_id, {**record, "session_id": session_id, **ident, "ts": self.clock()}, create=create)
         except WriterError as e:
             raise GateError(str(e)) from e
 
     def _load(self, session_id: str) -> _Session:
         try:
-            return _replay(self.writer.read_session_events(session_id))
+            s = _replay(self.writer.read_session_events(session_id))
         except WriterError as e:
             raise GateError(str(e)) from e
+        if self.enforce_owner:
+            who = self._who()
+            # Every session operation comes through here. Another caller's session, or one with no owner, reads as
+            # missing with the writer's own wording, so its existence is not revealed.
+            if who.id is None or s.owner != who.id:
+                raise GateError(f"unknown session: {session_id}")
+        return s
 
     def _load_active(self, session_id: str) -> _Session:
         s = self._load(session_id)
@@ -319,9 +356,14 @@ class GateStore:
         if not scope or not scope.strip():
             raise GateError("scope is required, for example the model and tables under review")
         session_id = uuid.uuid4().hex
-        self._append(session_id, {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}, create=True)
+        owner = self._who().id
+        record: dict[str, Any] = {"type": "session_started", "flow": flow, "scope": scope, "stages": self.flows[flow], "stage_meta": self.stage_meta[flow]}
+        if owner is not None:
+            record["owner"] = owner
+        self._append(session_id, record, create=True)
         return self.view(session_id)
 
+    @_serialised
     def submit(self, session_id: str, stage: str, content: str, bronze_tables: list[str] | None = None, smx_rows: dict[str, list[dict[str, Any]]] | None = None, table_status: dict[str, str] | None = None) -> StageVersion:
         s = self._load_active(session_id)
         if s.complete:
@@ -351,6 +393,7 @@ class GateStore:
         self._append(session_id, record)
         return _version(self._load(session_id).versions[stage][-1])
 
+    @_serialised
     def decide(self, session_id: str, stage: str, version: int, decision: str, note: str | None = None, then: str | None = None, reopen_stage: str | None = None) -> SessionView:
         s = self._load_active(session_id)
         if decision not in DECISIONS:
@@ -387,6 +430,7 @@ class GateStore:
         self._append(session_id, {"type": "decision", "stage": stage, "version": version, "decision": decision, "note": note, "then": then, "reopen_stage": reopen_stage, "invalidated": invalidated})
         return self.view(session_id)
 
+    @_serialised
     def grant(self, session_id: str, permission: str, tables: list[str]) -> SessionView:
         """Log a permission to sample the given approved Bronze tables. Only while the session is at data_extraction (FR-B11)."""
         s = self._load_active(session_id)
@@ -407,6 +451,7 @@ class GateStore:
         self._append(session_id, {"type": "permission_granted", "permission": permission, "tables": [by_key[t.lower()] for t in wanted]})
         return self.view(session_id)
 
+    @_serialised
     def revoke(self, session_id: str, permission: str) -> SessionView:
         s = self._load(session_id)
         if permission not in PERMISSIONS:
@@ -431,6 +476,7 @@ class GateStore:
             raise GateError(f"table {name!r} is {status[name]}, not missing; only missing tables take a route or code")
         return name
 
+    @_serialised
     def choose_route(self, session_id: str, table: str, route: str) -> SessionView:
         s = self._load_active(session_id)
         if route not in ROUTES:
@@ -439,6 +485,7 @@ class GateStore:
         self._append(session_id, {"type": "route_chosen", "table": name, "route": route})
         return self.view(session_id)
 
+    @_serialised
     def provide_code(self, session_id: str, table: str, code: str, dialect: str) -> str:
         """Log code the modeller pasted for a missing table. Returns the table's approved name; parsing is the caller's job."""
         s = self._load_active(session_id)
@@ -549,6 +596,7 @@ class GateStore:
         s = self.require_complete(session_id)
         return [{"stage": stage, **s.versions[stage][s.approved[stage] - 1]} for stage in s.stages]
 
+    @_serialised
     def record_artifact(self, session_id: str, path: str) -> None:
         self.require_complete(session_id)
         self._append(session_id, {"type": "artifact_written", "path": path})
@@ -584,17 +632,29 @@ class GateStore:
         return SessionView(
             session_id=s.session_id, flow=s.flow, scope=s.scope, status=status, created_by=s.created_by, created_at=s.created_at,
             current_stage=current, stages=stages, allowed_next=allowed, decision_log=log, artifacts=s.artifacts,
-            permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"]) for e in s.permission_log],
+            permissions=[PermissionEntry(event="granted" if e["type"] == "permission_granted" else "revoked", permission=e["permission"], tables=e.get("tables", []), user=e["user"], ts=e["ts"], user_id=e.get("user_id")) for e in s.permission_log],
             granted_tables=s.grant,
             missing_tables=[_missing_view(t, s.routes.get(t)) for t, st in (s.approved_table_status or {}).items() if st == "missing"],
         )
 
     def list_sessions(self) -> list[SessionSummary]:
+        """Every readable session; in HTTP mode only the caller's own. The owner is on the first line of each log, so
+        another caller's session is skipped without reading the rest of its log."""
+        owner = None
+        if self.enforce_owner:
+            try:
+                owner = self._who().id
+            except GateError:
+                return []
+            if owner is None:
+                return []
         out = []
         for sid in self.writer.list_session_ids():
             try:
+                if owner is not None and self.writer.read_session_head(sid).get("owner") != owner:
+                    continue
                 v = self.view(sid)
-            except GateError:
+            except (GateError, WriterError, ValueError):
                 continue
             out.append(SessionSummary(session_id=sid, flow=v.flow, scope=v.scope, status=v.status, current_stage=v.current_stage, created_at=v.created_at))
         return out

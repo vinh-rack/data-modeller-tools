@@ -1,0 +1,50 @@
+# Local testing of the v2 hosted server: one service in dev auth mode on 127.0.0.1:8000, synthetic fixtures only.
+#   docker compose up -d --build      then      curl http://127.0.0.1:8000/health
+# Put DMA_DEV_TOKEN (32+ characters) in .env. Never use dev auth on a shared host; see README, "v2: hosted".
+# One replica only: the gate logs use a file lock, and more replicas would need shared storage with locking.
+
+services:
+  dma:
+    build:
+      context: .
+      args:
+        DMA_GIT_COMMIT: ${DMA_GIT_COMMIT:-unknown}
+    image: dma:dev
+    env_file:
+      - path: .env
+        required: false
+    # These win over .env, whose paths are for stdio on the host.
+    environment:
+      DMA_TRANSPORT: http
+      DMA_HTTP_HOST: 0.0.0.0
+      DMA_HTTP_PORT: "8000"
+      DMA_DATA_DIR: /data
+      DMA_SMX_DIR: /data/smx
+      DMA_KB_DIR: /data/kb
+      DMA_OUTPUT_DIR: /data/output
+      DMA_DBT_REPO: /data/dbt
+      DMA_DBT_MANIFEST: ""
+      DMA_CONFIG_DIR: /app/config
+      DMA_AUTH: dev
+      # From the shell or .env; compose stops with this message when it is missing.
+      DMA_DEV_TOKEN: ${DMA_DEV_TOKEN:?set DMA_DEV_TOKEN (32+ characters) in .env or the shell}
+      # The container must listen on 0.0.0.0 for the port mapping; the port is published on 127.0.0.1 only.
+      DMA_ALLOW_DEV_AUTH_ON_NETWORK: "1"
+      DMA_RESOURCE_SERVER_URL: http://127.0.0.1:8000/mcp
+      DMA_ALLOWED_HOSTS: 127.0.0.1:8000,localhost:8000
+      DMA_ALLOWED_ORIGINS: http://127.0.0.1:8000,http://localhost:8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - dma-output:/data/output
+      - dma-dbt:/data/dbt
+      - ./tests/fixtures/smx:/data/smx:ro
+      - ./tests/fixtures/kb:/data/kb:ro
+    restart: unless-stopped
+
+volumes:
+  dma-output:
+  dma-dbt:

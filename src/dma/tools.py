@@ -1,30 +1,38 @@
 """Tool logic as plain methods. Transport-agnostic: server.py only registers these."""
 
 import json
+import threading
+import time
+from pathlib import Path
 from collections import Counter
 from functools import cached_property
 from typing import Annotated, Any, Callable, Literal
 
 import sqlglot
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 from sqlglot import exp
 from pydantic import BaseModel, Field
 
 from dma.config import Settings, load_gates, load_yaml
 from dma.connectors.sampling import MAX_SAMPLE_ROWS, RowSampler, SamplingUnavailable, UnavailableSampler
 from dma.connectors.powerbi import PbiModelMetadata, PbiReportInfo, PowerBIClient, PowerBIError, model_metadata, report_info
+from dma.identity import CallerResolver, CallerUnknown, static_caller
 from dma.gate import CODE_DIALECTS, REQUIREMENTS_STAGE, After, Decision, GateError, GateStore, SessionSummary, SessionView, StageVersion
 from dma.index.model_index import ModelIndex, summarise
 from dma.kb import KbDocument, KbError, KbFile, KnowledgeBase, ReportEntry
 from dma.lineage.diagram import Direction, LineageGraph, ReportLineage, report_lineage, table_lineage
 from dma.lineage.dbt_manifest import DbtManifest, ManifestError
 from dma.lineage.dbt_models import DbtUpstream, Unresolved
-from dma.lineage.dbt_pull import DbtPuller, PullResult
+from dma.lineage.dbt_clone import CloneResult
+from dma.lineage.dbt_pull import DbtPuller, PullResult, Runner
 from dma.lineage.dbt_repo import DbtColumn, DbtRef, DbtRepo, DbtRepoError, DbtSourceRef
 from dma.lineage.sql_lineage import LineageError, SqlLineage, column_lineage
 from dma.models import Finding, ModelInfo, Table, TableSummary
 from dma.rules import RuleContext, run_rules
 from dma.writer import ArtifactKind, ArtifactWriter, WriterError, WrittenArtifact
+
+ARTIFACT_URI = "dma://artifacts/{session_id}/{file_name}"
+WORKBOOK_URI = "dma://workbooks/{session_id}/{file_name}"
 
 
 class ModelList(BaseModel):
@@ -100,6 +108,7 @@ class DbtRepoStatus(BaseModel):
     sources: int = 0
     seeds: int = 0
     problems: list[str] = Field(default_factory=list)
+    clone: CloneResult | None = Field(default=None, description="Hosted mode only: the clone made when the server started")
 
 
 class SampleResult(BaseModel):
@@ -142,37 +151,61 @@ def _provided_bronze(repo: DbtRepo, r: Any, dialect: str, bronze_types: list[str
     return sorted(found.values(), key=lambda b: b.table)
 
 
+def _artifact_uri(session_id: str, w: WrittenArtifact) -> str:
+    template = WORKBOOK_URI if w.kind == "proposed_smx_xlsx" else ARTIFACT_URI
+    return template.format(session_id=session_id, file_name=Path(w.path).name)
+
+
 def _cell(text: str | None) -> str:
     return (text or "").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
 
 
 class DmaTools:
-    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None):
+    def __init__(self, settings: Settings, pbi_factory: Callable[[], PowerBIClient] = PowerBIClient.from_env, sampler: RowSampler | None = None, caller: CallerResolver | None = None, enforce_owner: bool = False, clock: Callable[[], float] = time.monotonic):
         self.settings = settings
+        self._clock = clock
+        # stdio: the DMA_USER label. HTTP: server.py passes a resolver that reads the verified token.
+        self.caller: CallerResolver = caller or static_caller(settings.user)
         self.sampler = sampler or UnavailableSampler()
         self._pbi_factory = pbi_factory
-        self._pbi_client: PowerBIClient | None = None
+        self._pbi_clients: dict[str | None, PowerBIClient] = {}
+        self._pbi_lock = threading.Lock()
         self.mapping = load_yaml(settings.config_dir, "smx_mapping.yaml")
         self.rules_cfg = load_yaml(settings.config_dir, "rules.yaml")
         self.kb = KnowledgeBase(settings.kb_dir)
         self.dbt_cfg = load_yaml(settings.config_dir, "dbt.yaml")
+        self._index: ModelIndex | None = None
+        self._index_seen: tuple = ()
+        self._index_lock = threading.Lock()
         self._dbt_pull: PullResult | None = None
+        self._dbt_loaded: DbtRepo | None = None
+        self._dbt_loaded_at = 0.0
+        self._dbt_lock = threading.Lock()
+        # Hosted mode: the start-up clone result, and a git runner that adds the token per command (dbt_clone.py).
+        self.dbt_clone: CloneResult | None = None
+        self.git_runner: Runner | None = None
         self.writer = ArtifactWriter(settings.output_dir, protected=[settings.smx_dir])
         try:
             gates, templates, smx_template = load_gates(settings.config_dir)
-            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template)
+            self.gate = GateStore(self.writer, gates, user=settings.user, templates=templates, smx_template=smx_template, caller=self.caller, enforce_owner=enforce_owner)
         except GateError as e:
             raise ToolError(str(e)) from e
 
-    @cached_property
+    @property
     def index(self) -> ModelIndex:
+        """Every SMX workbook in the folder, built again whenever a workbook is added, changed or removed, so a
+        long-running server never checks reuse against an old set of models."""
         if not self.settings.smx_dir.is_dir():
             raise ToolError(f"SMX folder not found: {self.settings.smx_dir}. Set DMA_SMX_DIR.")
-        return ModelIndex.build(self.settings.smx_dir, self.mapping, self.rules_cfg)
+        seen = tuple(sorted((p.name, p.stat().st_mtime_ns, p.stat().st_size) for p in self.settings.smx_dir.glob("*.xlsx") if not p.name.startswith("~$")))
+        with self._index_lock:
+            if self._index is None or seen != self._index_seen:
+                self._index, self._index_seen = ModelIndex.build(self.settings.smx_dir, self.mapping, self.rules_cfg), seen
+            return self._index
 
-    def _model_tables(self, model_name: str) -> list[Table]:
+    def _model_tables(self, index: ModelIndex, model_name: str) -> list[Table]:
         try:
-            return self.index.get_model(model_name)
+            return index.get_model(model_name)
         except KeyError as e:
             raise ToolError(str(e.args[0])) from e
 
@@ -180,8 +213,9 @@ class DmaTools:
         return ModelList(smx_dir=str(self.settings.smx_dir), models=self.index.list_models())
 
     def get_model(self, model_name: Annotated[str, Field(description="Model name as returned by list_models (workbook file name without .xlsx).")]) -> ModelDetail:
-        tables = self._model_tables(model_name)
-        return ModelDetail(model=self.index.models[model_name], tables=tables)
+        index = self.index
+        tables = self._model_tables(index, model_name)
+        return ModelDetail(model=index.models[model_name], tables=tables)
 
     def find_tables_by_bronze(self, bronze_table: Annotated[str, Field(description="Bronze table, schema.table or bare table name, e.g. brnz_fleetops.booking.")]) -> TableList:
         return TableList(query=bronze_table, tables=[summarise(t) for t in self.index.by_bronze(bronze_table)])
@@ -205,7 +239,8 @@ class DmaTools:
         notes: list[str] = []
         if report_id:
             column_usage, notes = self._report_usage(report_id, workspace_id)
-        targets = self._model_tables(model_name)
+        index = self.index
+        targets = self._model_tables(index, model_name)
         if tables:
             wanted = {n.lower() for n in tables}
             selected = [t for t in targets if t.qualified.lower() in wanted or t.name.lower() in wanted]
@@ -214,7 +249,7 @@ class DmaTools:
             if unknown:
                 raise ToolError(f"tables not in model {model_name}: {unknown}")
             targets = selected
-        ctx = RuleContext(index=self.index, targets=targets, config=self.rules_cfg, column_usage=set(column_usage) if column_usage is not None else None)
+        ctx = RuleContext(index=index, targets=targets, config=self.rules_cfg, column_usage=set(column_usage) if column_usage is not None else None)
         findings = run_rules(ctx)
         return RuleRun(
             model=model_name,
@@ -277,19 +312,24 @@ class DmaTools:
 
     @cached_property
     def _dbt_puller(self) -> DbtPuller:
-        return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)))
+        runner = {"runner": self.git_runner} if self.git_runner else {}
+        return DbtPuller(self.settings.dbt_repo, self.writer, mode=self.settings.dbt_pull, interval_hours=float(self.dbt_cfg.get("pull_interval_hours", 24)), timeout=float(self.dbt_cfg.get("git_timeout_seconds", 60)), **runner)
 
-    @cached_property
+    @property
     def dbt_repo(self) -> DbtRepo:
-        """The local dbt clone, read once per server process after the daily pull. Raises ToolError when not configured."""
+        """The local dbt clone, read after the daily pull and read again once the pull interval has passed, so a
+        long-running server (the hosted container) also sees files of at most one day ago (D3). Raises ToolError when not configured."""
         if self.settings.dbt_repo is None:
             raise ToolError("DMA_DBT_REPO is not set. Clone the dbt repo once and point DMA_DBT_REPO at it.")
-        # The pull runs before the first read, so a session sees the files of at most one day ago (D3).
-        self._dbt_pull = self._dbt_puller.maybe_pull()
-        try:
-            return DbtRepo.load(self.settings.dbt_repo)
-        except DbtRepoError as e:
-            raise ToolError(str(e)) from e
+        with self._dbt_lock:
+            if self._dbt_loaded is None or self._clock() - self._dbt_loaded_at >= self._dbt_puller.interval.total_seconds():
+                self._dbt_pull = self._dbt_puller.maybe_pull()
+                try:
+                    repo = DbtRepo.load(self.settings.dbt_repo)
+                except DbtRepoError as e:
+                    raise ToolError(str(e)) from e
+                self._dbt_loaded, self._dbt_loaded_at = repo, self._clock()
+            return self._dbt_loaded
 
     def dbt_model_lookup(self, name: Annotated[str, Field(description="Model file name, alias, or a source table name such as raw_orders. Exact match only.")]) -> DbtLookup:
         repo = self.dbt_repo
@@ -316,12 +356,18 @@ class DmaTools:
 
     def dbt_repo_status(self) -> DbtRepoStatus:
         if self.settings.dbt_repo is None:
-            return DbtRepoStatus(configured=False, repo=None, pull_mode=self.settings.dbt_pull)
-        repo = self.dbt_repo
+            return DbtRepoStatus(configured=False, repo=None, pull_mode=self.settings.dbt_pull, clone=self.dbt_clone)
+        try:
+            repo = self.dbt_repo
+        except ToolError as e:
+            # A clone that failed at start leaves no repo to read; report why instead of failing the status call.
+            if self.dbt_clone is None or self.dbt_clone.status in ("cloned", "present"):
+                raise
+            return DbtRepoStatus(configured=True, repo=str(self.settings.dbt_repo), pull_mode=self.settings.dbt_pull, problems=[str(e), f"clone at start: {self.dbt_clone.status}: {self.dbt_clone.detail}"], clone=self.dbt_clone)
         return DbtRepoStatus(
             configured=True, repo=str(self.settings.dbt_repo), project=repo.name, pull_mode=self.settings.dbt_pull,
             this_session_pull=self._dbt_pull, last_logged_pull=self._dbt_puller.last(), commit=self._dbt_puller.head(),
-            models=len(repo.models), sources=len(repo.sources), seeds=len(repo.seeds), problems=repo.problems,
+            models=len(repo.models), sources=len(repo.sources), seeds=len(repo.seeds), problems=repo.problems, clone=self.dbt_clone,
         )
 
     def sql_column_lineage(
@@ -336,13 +382,20 @@ class DmaTools:
             raise ToolError(str(e)) from e
 
     def _pbi(self) -> PowerBIClient:
-        # Built on first use and kept for the life of the server, so its response cache spans the IDE session.
-        if self._pbi_client is None:
-            try:
-                self._pbi_client = self._pbi_factory()
-            except PowerBIError as e:
-                raise ToolError(str(e)) from e
-        return self._pbi_client
+        # One client per caller, built on first use and kept for the life of the server, so its response cache spans
+        # the IDE session and is never shared between users. stdio has one caller, so this is the v1 single client.
+        try:
+            key = self.caller().id
+        except CallerUnknown as e:
+            raise ToolError(str(e)) from e
+        with self._pbi_lock:
+            client = self._pbi_clients.get(key)
+            if client is None:
+                try:
+                    client = self._pbi_clients[key] = self._pbi_factory()
+                except PowerBIError as e:
+                    raise ToolError(str(e)) from e
+        return client
 
     def pbi_get_report(
         self,
@@ -503,12 +556,14 @@ class DmaTools:
                 "permission_log": [p.model_dump() for p in view.permissions],
             }
             stem = f"{view.flow}_{session_id[:8]}"
+            owner = self.caller().id
             written = [
-                self.writer.write("findings_md", f"{stem}_report", "\n".join(md) + "\n"),
-                self.writer.write("decisions_json", f"{stem}_decisions", json.dumps(decisions, ensure_ascii=False)),
+                self.writer.write("findings_md", f"{stem}_report", "\n".join(md) + "\n", owner=owner),
+                self.writer.write("decisions_json", f"{stem}_decisions", json.dumps(decisions, ensure_ascii=False), owner=owner),
             ]
             for w in written:
                 self.gate.record_artifact(session_id, w.path)
+                w.uri = _artifact_uri(session_id, w)
             return CompiledReport(session_id=session_id, artifacts=written)
         except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
@@ -557,9 +612,26 @@ class DmaTools:
                 empty = [s["name"] for s in sheets if not s["rows"]]
                 notes = [f"sheets with no approved rows (header only): {', '.join(empty)}"] if empty else []
                 content = json.dumps({"sheets": sheets, "style": self.gate.smx_style}, ensure_ascii=False)
-            written = self.writer.write(kind, name, content)
+            # A verified caller (HTTP mode) writes into output/<their id>/; stdio has no id and writes into the root as before.
+            written = self.writer.write(kind, name, content, owner=self.caller().id)
             written.notes = notes
             self.gate.record_artifact(session_id, written.path)
+            written.uri = _artifact_uri(session_id, written)
             return written
         except (GateError, WriterError) as e:
             raise ToolError(str(e)) from e
+
+    def read_artifact(self, session_id: str, file_name: str, binary: bool) -> str | bytes:
+        """Serve an artifact of the caller's own session as an MCP resource, so a client that cannot open the
+        server's output folder still gets the file. Only files the session recorded are served, read-only."""
+        try:
+            view = self.gate.view(session_id)
+            paths = [p for p in view.artifacts if Path(p).name == file_name]
+            if not paths:
+                raise GateError(f"session {session_id} has no artifact named {file_name!r}")
+            if file_name.endswith(".xlsx") != binary:
+                raise GateError(f"{file_name!r} is served from {WORKBOOK_URI if file_name.endswith('.xlsx') else ARTIFACT_URI}")
+            data = self.writer.read_artifact(paths[-1])
+        except (GateError, WriterError) as e:
+            raise ResourceError(str(e)) from e
+        return data if binary else data.decode("utf-8")

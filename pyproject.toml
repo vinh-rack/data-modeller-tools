@@ -11,12 +11,18 @@ dependencies = [
     "pyyaml>=6.0.3",
     "sqlglot==30.*",
     "python-dotenv>=1.2",
+    # Entra token validation in HTTP mode. Already a dependency of mcp; declared because dma.auth imports it.
+    "pyjwt[crypto]>=2.15",
 ]
 
 [project.optional-dependencies]
 # Parses the Apache Arrow (LZ4) response of Execute DAX Queries In Group, the route to INFO functions and M transforms.
 pbi-arrow = [
     "pyarrow>=26",
+]
+# The hosted server (DMA_AUTH=entra): MSAL for the on-behalf-of exchange that gets each user's own Power BI token.
+hosted = [
+    "msal>=1.39",
 ]
 
 [project.scripts]

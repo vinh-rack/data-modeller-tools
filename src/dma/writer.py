@@ -3,9 +3,16 @@
 import io
 import json
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, Iterator, Literal
+
+try:
+    import fcntl
+except ImportError:  # Windows: the in-process lock alone serves the one stdio process.
+    fcntl = None
 
 import openpyxl
 from openpyxl.comments import Comment
@@ -26,6 +33,9 @@ MAX_BYTES = 5 * 1024 * 1024
 SESSIONS_DIR = ".sessions"
 EVENTS_FILE = "events.jsonl"
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+# A verified caller's id (an Entra oid, or the dev user id) names their artifact folder. No dots, so it can never be
+# .sessions, .dbt, "." or "..", and no separators.
+OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 MAX_EVENT_BYTES = 2 * 1024 * 1024
 MAX_SESSION_BYTES = 50 * 1024 * 1024
 DBT_DIR = ".dbt"
@@ -37,15 +47,35 @@ class WriterError(ValueError):
     pass
 
 
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 class WrittenArtifact(BaseModel):
     kind: str
     path: str
     bytes: int
     notes: list[str] = []
+    # Getting outputs back to a client that cannot open the server's output folder (v2 hosted): the text itself for
+    # text kinds, and for every kind the MCP resource URI that serves the file.
+    uri: str | None = None
+    content: str | None = None
 
 
 def _utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+
+
+class _SessionLock:
+    """One per session log path in this process: a reentrant thread lock, plus an exclusive flock on the log itself
+    (POSIX only) taken by the outermost holder, so a nested use in the same thread never waits on its own flock."""
+
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.depth = 0
+
+
+_SESSION_LOCKS: dict[str, _SessionLock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
 
 
 class ArtifactWriter:
@@ -57,8 +87,22 @@ class ArtifactWriter:
             if self.root == p or self.root.is_relative_to(p):
                 raise WriterError(f"output root {self.root} must not be inside protected folder {p}")
 
-    def safe_path(self, filename: str) -> Path:
-        """Resolve filename inside the root. Raises WriterError on any escape attempt."""
+    def owner_dir(self, owner: str) -> Path:
+        """output/<owner>/, the artifact folder of one verified caller. Raises WriterError on a bad id, a symlink or a junction."""
+        if not isinstance(owner, str) or not OWNER_RE.match(owner):
+            raise WriterError(f"owner must match {OWNER_RE.pattern}, got {owner!r}")
+        folder = self.root / owner
+        if folder.is_symlink():
+            raise WriterError(f"refusing to use a symlink as the owner folder: {owner}")
+        if folder.exists() and folder.resolve() != folder:
+            raise WriterError(f"owner folder escapes the output root: {owner}")
+        return folder
+
+    def safe_path(self, filename: str, folder: Path | None = None) -> Path:
+        """Resolve filename inside the root, or inside an owner folder of the root. Raises WriterError on any escape attempt."""
+        base = self.root if folder is None else folder
+        if base != self.root and base.parent != self.root:
+            raise WriterError("files may only be written in the output root or one owner folder directly under it")
         if not filename or "\x00" in filename:
             raise WriterError("empty filename or null byte")
         if any(ch in filename for ch in "/\\:"):
@@ -68,14 +112,15 @@ class ArtifactWriter:
             raise WriterError(f"absolute paths are not allowed: {filename!r}")
         if len(candidate.parts) != 1 or candidate.name in (".", ".."):
             raise WriterError(f"subfolders and traversal are not allowed: {filename!r}")
-        target = (self.root / candidate).resolve()
-        if target.parent != self.root or not target.is_relative_to(self.root):
+        target = (base / candidate).resolve()
+        if target.parent != base or not target.is_relative_to(self.root):
             raise WriterError(f"path escapes the output root: {filename!r}")
-        if (self.root / candidate).is_symlink():
+        if (base / candidate).is_symlink():
             raise WriterError(f"refusing to write through a symlink: {filename!r}")
         return target
 
-    def write(self, kind: str, name: str, content: str) -> WrittenArtifact:
+    def write(self, kind: str, name: str, content: str, owner: str | None = None) -> WrittenArtifact:
+        """A new file in the output root, or with an owner (HTTP mode) in output/<owner>/. Never overwrites."""
         if kind not in EXTENSIONS:
             raise WriterError(f"kind must be one of {sorted(EXTENSIONS)}, got {kind!r}")
         if not NAME_RE.match(name or "") or ".." in name:
@@ -84,14 +129,35 @@ class ArtifactWriter:
             raise WriterError(f"content larger than {MAX_BYTES} bytes")
 
         self.root.mkdir(parents=True, exist_ok=True)
-        target = self.safe_path(f"{self.clock()}_{name}{EXTENSIONS[kind]}")
+        folder = None
+        if owner is not None:
+            folder = self.owner_dir(owner)
+            folder.mkdir(exist_ok=True)
+            # Checked again after mkdir, in case the folder appeared as a link in between.
+            folder = self.owner_dir(owner)
+        target = self.safe_path(f"{self.clock()}_{name}{EXTENSIONS[kind]}", folder)
         data = self._render(kind, content)
         try:
             with open(target, "xb") as fh:
                 fh.write(data)
         except FileExistsError as e:
             raise WriterError(f"refusing to overwrite existing file {target.name}") from e
-        return WrittenArtifact(kind=kind, path=str(target), bytes=len(data))
+        text = None if kind == "proposed_smx_xlsx" else data.decode("utf-8")
+        return WrittenArtifact(kind=kind, path=str(target), bytes=len(data), content=text)
+
+    def read_artifact(self, path: str) -> bytes:
+        """Read back an artifact this writer wrote: a file in the output root or in one owner folder, never a log."""
+        p = Path(path)
+        if p.is_symlink():
+            raise WriterError(f"refusing to read through a symlink: {p.name}")
+        target = p.resolve()
+        folder = target.parent
+        inside = folder == self.root or (folder.parent == self.root and OWNER_RE.match(folder.name) is not None)
+        if not inside or target.suffix not in EXTENSIONS.values():
+            raise WriterError(f"not an artifact in the output root: {p.name}")
+        if not target.is_file():
+            raise WriterError(f"artifact no longer exists: {p.name}")
+        return target.read_bytes()
 
     def session_log(self, session_id: str) -> Path:
         """Path of output/.sessions/<id>/events.jsonl. Raises WriterError on a bad id, a symlink or a junction anywhere on the way."""
@@ -127,12 +193,42 @@ class ArtifactWriter:
         with open(target, mode) as fh:
             fh.write(line)
 
+    @contextmanager
+    def session_lock(self, session_id: str) -> Iterator[None]:
+        """Hold the session exclusively while the caller replays its log, checks and appends. No file is created:
+        the flock is on events.jsonl itself, and only when it exists. One replica is the supported setup."""
+        target = self.session_log(session_id)
+        with _SESSION_LOCKS_GUARD:
+            entry = _SESSION_LOCKS.setdefault(str(target), _SessionLock())
+        with entry.lock:
+            entry.depth += 1
+            fh = None
+            try:
+                if entry.depth == 1 and fcntl is not None and target.is_file():
+                    fh = open(target, "rb")
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+                yield
+            finally:
+                entry.depth -= 1
+                if fh is not None:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                    fh.close()
+
     def read_session_events(self, session_id: str) -> list[dict]:
         target = self.session_log(session_id)
         if not target.is_file():
             raise WriterError(f"unknown session: {session_id}")
         with open(target, encoding="utf-8") as fh:
             return [json.loads(line) for line in fh if line.strip()]
+
+    def read_session_head(self, session_id: str) -> dict:
+        """The first event of a session log only (session_started, which names the owner), without reading the rest."""
+        target = self.session_log(session_id)
+        if not target.is_file():
+            raise WriterError(f"unknown session: {session_id}")
+        with open(target, encoding="utf-8") as fh:
+            head = json.loads(fh.readline() or "{}")
+        return head if isinstance(head, dict) else {}
 
     def dbt_pull_log(self) -> Path:
         """Path of output/.dbt/pulls.jsonl, the append-only record of daily dbt repo pulls. Same symlink and junction checks as session logs."""

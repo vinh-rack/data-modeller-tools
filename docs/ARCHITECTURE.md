@@ -339,7 +339,7 @@ What Phase 0 leaves out is listed in `PHASE_0_ARCH.md`.
 | Read-only credentials for every source system | Read-only is enforced, not just promised |
 | Writer can only write inside `output/` | Baseline SMX is never overwritten |
 | Every finding carries rule_id, table, column, severity, evidence | Fully traceable |
-| Model index rebuilt from source at session start | Avoids stale reuse detection |
+| Model index rebuilt from source whenever an SMX workbook is added, changed or removed | Avoids stale reuse detection |
 | One rules/KB repo shared by all IDEs | One source of truth |
 
 ---

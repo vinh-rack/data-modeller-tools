@@ -85,3 +85,36 @@ def test_credentials_in_git_output_are_masked(writer):
     r = puller(writer, git).maybe_pull()
     assert "s3cret" not in r.detail and "https://***@example.com" in r.detail
     assert "s3cret" not in str(writer.read_dbt_pulls())
+
+
+def test_long_running_server_pulls_and_rereads_after_the_interval(tmp_path):
+    import shutil
+
+    from conftest import CONFIG_DIR, FIXTURES, SMX_DIR
+    from dma.config import load_settings
+    from dma.tools import DmaTools
+
+    repo = tmp_path / "dbt"
+    shutil.copytree(FIXTURES / "dbt_repo", repo)
+    settings = load_settings({"DMA_SMX_DIR": str(SMX_DIR), "DMA_OUTPUT_DIR": str(tmp_path / "output"), "DMA_CONFIG_DIR": str(CONFIG_DIR), "DMA_DBT_REPO": str(repo)})
+    now = [1000.0]
+    tools = DmaTools(settings, clock=lambda: now[0])
+    pulls = []
+
+    def git(args, timeout):
+        sub = " ".join(args[3:])
+        if sub == "pull --ff-only":
+            pulls.append(sub)
+        out = {"rev-parse --is-inside-work-tree": "true\n", "rev-parse HEAD": "aaa\n"}.get(sub, "")
+        return subprocess.CompletedProcess(args, 0, out, "")
+
+    tools.git_runner = git
+    assert not tools.dbt_model_lookup("stg_new").exists and len(pulls) == 1
+    # A new model lands in the clone. Within the interval the server keeps the files it read.
+    (repo / "models" / "staging" / "stg_new.sql").write_text("select 1 as id\n", encoding="utf-8")
+    now[0] += 23 * 3600
+    assert not tools.dbt_model_lookup("stg_new").exists and len(pulls) == 1
+    # After the interval it pulls again (the pull log is a day old) and reads the clone again.
+    tools._dbt_puller._clock = lambda: datetime.now(timezone.utc) + timedelta(hours=25)
+    now[0] += 2 * 3600
+    assert tools.dbt_model_lookup("stg_new").exists and len(pulls) == 2
